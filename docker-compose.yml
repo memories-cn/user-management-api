@@ -36,6 +36,9 @@ services:
       APP_HTTP_ADDR: :8080
       DATABASE_DSN: postgres://postgres:postgres@postgres:5432/iam?sslmode=disable
       CASBIN_MODEL_PATH: /casbin/model.conf
+      # 必须配置为可用的 ZITADEL 实例，服务启动会校验并快速失败。
+      ZITADEL_ISSUER: ${ZITADEL_ISSUER:-https://auth.example.com}
+      ZITADEL_API_AUDIENCE: ${ZITADEL_API_AUDIENCE:-iam-api-audience}
       LOG_LEVEL: info
     ports:
       - "8080:8080"

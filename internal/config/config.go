@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -19,12 +20,17 @@ const (
 	AppEnvDev        = "dev"
 	AppEnvProduction = "production"
 
+	// TokenModeJWT 表示本地 JWT 验签。
+	TokenModeJWT = "jwt"
+
 	// 默认值集中定义，避免散落在代码中。
 	defaultHTTPAddr        = ":8080"
 	defaultAppEnv          = AppEnvDev
 	defaultLogLevel        = "info"
 	defaultShutdownTimeout = 10 * time.Second
 	defaultCasbinModelPath = "./casbin/model.conf"
+	defaultTokenMode       = TokenModeJWT
+	defaultJWKSCacheTTL    = 15 * time.Minute
 
 	// 环境变量名集中定义，便于文档与测试引用。
 	EnvDatabaseDSN     = "DATABASE_DSN"
@@ -34,6 +40,13 @@ const (
 	EnvCasbinModelPath = "CASBIN_MODEL_PATH"
 	EnvLogLevel        = "LOG_LEVEL"
 	EnvShutdownTimeout = "APP_SHUTDOWN_TIMEOUT"
+
+	EnvZitadelIssuer                 = "ZITADEL_ISSUER"
+	EnvZitadelClientID               = "ZITADEL_CLIENT_ID"
+	EnvZitadelAPIAudience            = "ZITADEL_API_AUDIENCE"
+	EnvZitadelServiceCredentialsFile = "ZITADEL_SERVICE_CREDENTIALS_FILE"
+	EnvAuthTokenMode                 = "AUTH_TOKEN_MODE"
+	EnvAuthJWKSCacheTTL              = "AUTH_JWKS_CACHE_TTL"
 )
 
 // Config 保存服务运行所需的全部配置。
@@ -52,6 +65,18 @@ type Config struct {
 	LogLevel string
 	// ShutdownTimeout 是优雅关闭的在途请求宽限期。
 	ShutdownTimeout time.Duration
+
+	// ZITADEL 与令牌校验相关配置。
+	ZitadelIssuer   string
+	ZitadelClientID string
+	// ZitadelAPIAudience 必须与令牌中的 aud 匹配，不能猜测（见 docs/TDD.md 13.2）。
+	ZitadelAPIAudience string
+	// ZitadelServiceCredentialsFile 仅用于访问 ZITADEL 管理 API 的服务身份，本阶段不使用。
+	ZitadelServiceCredentialsFile string
+	// AuthTokenMode 目前仅支持 jwt；introspect 尚未实现，必须显式报错而非静默降级。
+	AuthTokenMode string
+	// AuthJWKSCacheTTL 当前仅解析不生效：go-oidc 的密钥缓存与轮换由其内部策略决定。
+	AuthJWKSCacheTTL time.Duration
 }
 
 // Load 读取环境变量并返回校验后的配置。
@@ -60,13 +85,18 @@ func Load() (Config, error) {
 	var errs []error
 
 	cfg := Config{
-		AppEnv:          defaultAppEnv,
-		HTTPAddr:        defaultHTTPAddr,
-		DatabaseDSN:     env(EnvDatabaseDSN),
-		RedisAddr:       env(EnvRedisAddr),
-		CasbinModelPath: defaultCasbinModelPath,
-		LogLevel:        defaultLogLevel,
-		ShutdownTimeout: defaultShutdownTimeout,
+		AppEnv:                        defaultAppEnv,
+		HTTPAddr:                      defaultHTTPAddr,
+		DatabaseDSN:                   env(EnvDatabaseDSN),
+		RedisAddr:                     env(EnvRedisAddr),
+		CasbinModelPath:               defaultCasbinModelPath,
+		LogLevel:                      defaultLogLevel,
+		ShutdownTimeout:               defaultShutdownTimeout,
+		ZitadelClientID:               env(EnvZitadelClientID),
+		ZitadelAPIAudience:            env(EnvZitadelAPIAudience),
+		ZitadelServiceCredentialsFile: env(EnvZitadelServiceCredentialsFile),
+		AuthTokenMode:                 defaultTokenMode,
+		AuthJWKSCacheTTL:              defaultJWKSCacheTTL,
 	}
 
 	if cfg.DatabaseDSN == "" {
@@ -114,10 +144,79 @@ func Load() (Config, error) {
 		}
 	}
 
+	errs = append(errs, loadZitadelConfig(&cfg)...)
+
 	if len(errs) > 0 {
 		return Config{}, fmt.Errorf("配置校验失败：%w", errors.Join(errs...))
 	}
 	return cfg, nil
+}
+
+// LoadDatabaseDSN 只读取并校验迁移所需的数据库配置。
+//
+// 迁移命令不依赖身份平台配置，不应因为缺少 ZITADEL_* 而无法执行迁移。
+func LoadDatabaseDSN() (string, error) {
+	dsn := env(EnvDatabaseDSN)
+	if dsn == "" {
+		return "", fmt.Errorf("配置校验失败：%s 为必填项，不能为空", EnvDatabaseDSN)
+	}
+	return dsn, nil
+}
+
+// loadZitadelConfig 解析并校验 ZITADEL 与令牌校验配置，返回全部错误。
+func loadZitadelConfig(cfg *Config) []error {
+	var errs []error
+
+	issuer := env(EnvZitadelIssuer)
+	if issuer == "" {
+		errs = append(errs, fmt.Errorf("%s 为必填项，不能为空", EnvZitadelIssuer))
+	} else {
+		parsed, err := url.Parse(issuer)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("%s 不是合法的 URL：%w", EnvZitadelIssuer, err))
+		case parsed.Scheme != "http" && parsed.Scheme != "https":
+			errs = append(errs, fmt.Errorf("%s 必须使用 http 或 https：%q", EnvZitadelIssuer, issuer))
+		case parsed.Host == "":
+			errs = append(errs, fmt.Errorf("%s 缺少主机名：%q", EnvZitadelIssuer, issuer))
+		case cfg.AppEnv == AppEnvProduction && parsed.Scheme != "https":
+			errs = append(errs, fmt.Errorf("%s 在生产环境必须使用 https：%q", EnvZitadelIssuer, issuer))
+		default:
+			// Discovery 路径由 go-oidc 拼接，尾斜杠会造成双斜杠，统一去掉。
+			cfg.ZitadelIssuer = strings.TrimSuffix(issuer, "/")
+		}
+	}
+
+	if cfg.ZitadelAPIAudience == "" {
+		errs = append(errs, fmt.Errorf("%s 为必填项，不能为空", EnvZitadelAPIAudience))
+	}
+
+	if v := env(EnvAuthTokenMode); v != "" {
+		cfg.AuthTokenMode = v
+	}
+	switch cfg.AuthTokenMode {
+	case TokenModeJWT:
+		// 当前唯一支持的模式。
+	case "introspect":
+		errs = append(errs, fmt.Errorf("%s=introspect 尚未实现，当前仅支持 %s",
+			EnvAuthTokenMode, TokenModeJWT))
+	default:
+		errs = append(errs, fmt.Errorf("%s 取值非法：%q，当前仅支持 %s",
+			EnvAuthTokenMode, cfg.AuthTokenMode, TokenModeJWT))
+	}
+
+	if v := env(EnvAuthJWKSCacheTTL); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s 不是合法的时间段：%w", EnvAuthJWKSCacheTTL, err))
+		} else if d <= 0 {
+			errs = append(errs, fmt.Errorf("%s 必须大于 0", EnvAuthJWKSCacheTTL))
+		} else {
+			cfg.AuthJWKSCacheTTL = d
+		}
+	}
+
+	return errs
 }
 
 // IsProduction 报告当前是否运行在生产环境。

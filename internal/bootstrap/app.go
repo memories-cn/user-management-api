@@ -9,7 +9,9 @@ import (
 	"github.com/casbin/casbin/v3"
 	"gorm.io/gorm"
 
+	appuser "github.com/example/iam-service/internal/application/user"
 	"github.com/example/iam-service/internal/config"
+	"github.com/example/iam-service/internal/ports"
 )
 
 // App 聚合进程运行期依赖，提供统一的就绪检查入口。
@@ -18,9 +20,15 @@ type App struct {
 	DB *gorm.DB
 	// Enforcer 是已加载策略的授权引擎，本阶段仅校验其可用，尚未接入业务判定。
 	Enforcer *casbin.Enforcer
+	// Verifier 校验访问令牌。
+	Verifier ports.TokenVerifier
+	// Users 是用户仓储。
+	Users ports.UserRepository
+	// UserSync 执行用户按需同步。
+	UserSync *appuser.SyncService
 }
 
-// New 按 配置 → 数据库 → 迁移校验 → 授权引擎 的顺序装配依赖。
+// New 按 配置 → 数据库 → 迁移校验 → 授权引擎 → 身份链路 的顺序装配依赖。
 // 任一步失败即返回错误，由调用方决定是否退出进程（快速失败）。
 func New(cfg config.Config) (*App, error) {
 	db, err := OpenDB(cfg)
@@ -39,7 +47,21 @@ func New(cfg config.Config) (*App, error) {
 		return nil, err
 	}
 
-	return &App{DB: db, Enforcer: enforcer}, nil
+	verifier, err := NewTokenVerifier(context.Background(), cfg)
+	if err != nil {
+		closeDB(db)
+		return nil, err
+	}
+
+	users := NewUserRepository(db)
+
+	return &App{
+		DB:       db,
+		Enforcer: enforcer,
+		Verifier: verifier,
+		Users:    users,
+		UserSync: NewUserSync(users),
+	}, nil
 }
 
 // Check 实现 handlers.ReadinessProbe：校验数据库连通性、迁移状态与策略加载情况。

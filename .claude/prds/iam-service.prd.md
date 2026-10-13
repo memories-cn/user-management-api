@@ -71,7 +71,7 @@ We'll know we're right when **跨租户越权安全回归用例 100% 通过（Te
 | # | Milestone | Outcome | Status | Plan |
 | --- | --- | --- | --- | --- |
 | 1 | 可运行的服务骨架 | 服务能在本地与容器环境启动，健康检查可用，测试可重复执行 | complete | `.claude/PRPs/plans/iam-service-bootstrap.plan.md` |
-| 2 | 身份接入 | 持有有效 ZITADEL 凭证的请求可访问受保护接口；伪造、过期、受众错误、签发方错误的凭证被拒绝 | in-progress | `.claude/plans/iam-service-identity-integration.plan.md` |
+| 2 | 身份接入 | 持有有效 ZITADEL 凭证的请求可访问受保护接口；伪造、过期、受众错误、签发方错误的凭证被拒绝 | complete | `.claude/plans/iam-service-identity-integration.plan.md` |
 | 3 | 租户与成员 | 租户管理员可管理本租户成员及成员状态；所有租户级接口执行成员资格与租户状态检查 | pending | — |
 | 4 | 租户内 RBAC | 租户内角色与权限可配置，成员可分配角色，业务服务可通过统一接口判定权限；策略变更能正确撤权 | pending | — |
 | 5 | 管理后台 API 与审计 | 管理员能完成租户成员管理与角色权限配置；高风险操作全部留痕且审计访问受独立权限保护 | pending | — |

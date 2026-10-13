@@ -41,7 +41,8 @@ func main() {
 
 // run 执行指定迁移命令，DATABASE_DSN 来自环境变量。
 func run(cmd string, steps int) error {
-	cfg, err := config.Load()
+	// 迁移只依赖数据库配置，不要求 ZITADEL 等身份平台配置。
+	dsn, err := config.LoadDatabaseDSN()
 	if err != nil {
 		return err
 	}
@@ -51,7 +52,7 @@ func run(cmd string, steps int) error {
 		return fmt.Errorf("加载内嵌迁移文件失败：%w", err)
 	}
 
-	m, err := migrate.NewWithSourceInstance("iofs", src, cfg.DatabaseDSN)
+	m, err := migrate.NewWithSourceInstance("iofs", src, dsn)
 	if err != nil {
 		return fmt.Errorf("初始化迁移实例失败：%w", err)
 	}
