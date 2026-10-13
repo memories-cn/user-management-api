@@ -1,0 +1,49 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: iam
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d iam"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # 迁移作为独立、可审计的一步执行，不随 API 启动自动运行。
+  migrate:
+    build: .
+    entrypoint: ["/iam-migrate"]
+    command: ["-cmd", "up"]
+    environment:
+      DATABASE_DSN: postgres://postgres:postgres@postgres:5432/iam?sslmode=disable
+      LOG_LEVEL: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    entrypoint: ["/iam-api"]
+    environment:
+      APP_ENV: production
+      APP_HTTP_ADDR: :8080
+      DATABASE_DSN: postgres://postgres:postgres@postgres:5432/iam?sslmode=disable
+      CASBIN_MODEL_PATH: /casbin/model.conf
+      LOG_LEVEL: info
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:

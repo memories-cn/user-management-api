@@ -1,0 +1,9 @@
+.git
+.github
+.claude
+docs
+bin
+*.md
+.env
+.idea
+.vscode

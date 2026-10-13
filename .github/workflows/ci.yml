@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # 1. gofmt
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未通过 gofmt："
+            echo "$unformatted"
+            exit 1
+          fi
+
+      # 2. go vet
+      - name: go vet
+        run: go vet ./...
+
+      # 3. 单元测试
+      - name: unit tests
+        run: go test -short -race ./...
+
+      # 4. 构建
+      - name: build
+        run: go build ./...
+
+      # 5. 集成测试（GitHub Runner 自带 Docker）
+      - name: integration tests
+        run: go test ./tests/integration/... -count=1
+
+      # 6. Docker 镜像构建
+      - name: docker build
+        run: docker build -t iam-service:ci .
+
+      # TODO: 接入 govulncheck 做依赖漏洞扫描
