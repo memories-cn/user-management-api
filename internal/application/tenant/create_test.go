@@ -11,10 +11,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	appinvitation "github.com/example/iam-service/internal/application/invitation"
+	approle "github.com/example/iam-service/internal/application/role"
 	invitationdomain "github.com/example/iam-service/internal/domain/invitation"
 	membershipdomain "github.com/example/iam-service/internal/domain/membership"
+	domainrole "github.com/example/iam-service/internal/domain/role"
 	tenantdomain "github.com/example/iam-service/internal/domain/tenant"
 	"github.com/example/iam-service/internal/ports"
+	"github.com/example/iam-service/internal/rbactest"
 )
 
 // fakeTenants 是内存实现的租户仓储，支持回滚模拟。
@@ -170,17 +173,32 @@ var (
 )
 
 // newTestService 装配创建租户用例及其依赖替身。
-func newTestService() (*CreateService, *fakeTenants, *fakeInvitations, *fakeMemberships) {
+//
+// 授权域依赖使用真实用例 + 内存仓储替身（rbactest），以便断言
+// "创建租户时预置系统角色与策略投影"确实发生。
+func newTestService() (*CreateService, *fakeTenants, *fakeInvitations, *fakeMemberships, *rbactest.Fixture) {
 	tenants := newFakeTenants()
 	invitations := newFakeInvitations()
 	memberships := &fakeMemberships{}
-	invitationSvc := appinvitation.NewService(invitations, memberships, rollbackTx{}, 7*24*time.Hour)
-	svc := NewCreateService(tenants, rollbackTx{}, invitationSvc)
-	return svc, tenants, invitations, memberships
+
+	fix := rbactest.NewFixture(
+		"tenant:read", "tenant:update", "tenant:delete",
+		"member:read", "member:invite", "member:update", "member:remove",
+		"role:read", "role:create", "role:update", "role:delete", "role:assign",
+		"permission:read", "permission:assign", "audit:read",
+	)
+	assignments := approle.NewAssignmentService(
+		memberships, fix.Roles, fix.MembershipRoles, fix.Policies, fix.Tx, fix.Reloader)
+	roleSvc := approle.NewService(fix.Roles, fix.Permissions, fix.Policies, fix.Tx, fix.Reloader)
+
+	invitationSvc := appinvitation.NewService(
+		invitations, memberships, rollbackTx{}, assignments, domainrole.KeyMember, 7*24*time.Hour)
+	svc := NewCreateService(tenants, fix.Policies, rollbackTx{}, invitationSvc, roleSvc, fix.Reloader)
+	return svc, tenants, invitations, memberships, fix
 }
 
 func TestCreate_CreatesTenantAndOwnerInvitation(t *testing.T) {
-	svc, tenants, invitations, memberships := newTestService()
+	svc, tenants, invitations, memberships, _ := newTestService()
 	actor := uuid.New()
 
 	result, err := svc.Create(context.Background(), actor, "Acme", "acme", "Owner@Example.com")
@@ -199,7 +217,7 @@ func TestCreate_CreatesTenantAndOwnerInvitation(t *testing.T) {
 }
 
 func TestCreate_RejectsDuplicateSlug(t *testing.T) {
-	svc, tenants, _, _ := newTestService()
+	svc, tenants, _, _, _ := newTestService()
 	actor := uuid.New()
 	ctx := context.Background()
 
@@ -213,7 +231,7 @@ func TestCreate_RejectsDuplicateSlug(t *testing.T) {
 }
 
 func TestCreate_RejectsInvalidSlug(t *testing.T) {
-	svc, tenants, _, _ := newTestService()
+	svc, tenants, _, _, _ := newTestService()
 
 	_, err := svc.Create(context.Background(), uuid.New(), "Acme", "Acme_1", "owner@example.com")
 
@@ -222,7 +240,7 @@ func TestCreate_RejectsInvalidSlug(t *testing.T) {
 }
 
 func TestCreate_RequiresActor(t *testing.T) {
-	svc, _, _, _ := newTestService()
+	svc, _, _, _, _ := newTestService()
 
 	_, err := svc.Create(context.Background(), uuid.Nil, "Acme", "acme", "owner@example.com")
 
@@ -235,10 +253,15 @@ func TestCreate_RollsBackWhenInvitationFails(t *testing.T) {
 	invitations.createErr = errors.New("invitation 创建失败")
 	memberships := &fakeMemberships{}
 
+	fix := rbactest.NewFixture()
 	// 事务回滚：租户创建后邀请失败，租户不应留存。
 	tx := rollbackTx{rollback: func() { tenants.items = map[uuid.UUID]*tenantdomain.Tenant{} }}
-	invitationSvc := appinvitation.NewService(invitations, memberships, tx, 7*24*time.Hour)
-	svc := NewCreateService(tenants, tx, invitationSvc)
+	assignments := approle.NewAssignmentService(
+		memberships, fix.Roles, fix.MembershipRoles, fix.Policies, fix.Tx, fix.Reloader)
+	invitationSvc := appinvitation.NewService(
+		invitations, memberships, tx, assignments, domainrole.KeyMember, 7*24*time.Hour)
+	roleSvc := approle.NewService(fix.Roles, fix.Permissions, fix.Policies, fix.Tx, fix.Reloader)
+	svc := NewCreateService(tenants, fix.Policies, tx, invitationSvc, roleSvc, fix.Reloader)
 
 	_, err := svc.Create(context.Background(), uuid.New(), "Acme", "acme", "owner@example.com")
 
@@ -252,9 +275,14 @@ func TestCreate_RollsBackWhenTenantCreateFails(t *testing.T) {
 	invitations := newFakeInvitations()
 	memberships := &fakeMemberships{}
 
+	fix := rbactest.NewFixture()
 	tx := rollbackTx{}
-	invitationSvc := appinvitation.NewService(invitations, memberships, tx, 7*24*time.Hour)
-	svc := NewCreateService(tenants, tx, invitationSvc)
+	assignments := approle.NewAssignmentService(
+		memberships, fix.Roles, fix.MembershipRoles, fix.Policies, fix.Tx, fix.Reloader)
+	invitationSvc := appinvitation.NewService(
+		invitations, memberships, tx, assignments, domainrole.KeyMember, 7*24*time.Hour)
+	roleSvc := approle.NewService(fix.Roles, fix.Permissions, fix.Policies, fix.Tx, fix.Reloader)
+	svc := NewCreateService(tenants, fix.Policies, tx, invitationSvc, roleSvc, fix.Reloader)
 
 	_, err := svc.Create(context.Background(), uuid.New(), "Acme", "acme", "owner@example.com")
 

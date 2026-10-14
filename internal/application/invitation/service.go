@@ -14,9 +14,11 @@ import (
 
 	"github.com/google/uuid"
 
+	approle "github.com/example/iam-service/internal/application/role"
 	"github.com/example/iam-service/internal/domain/identity"
 	invitationdomain "github.com/example/iam-service/internal/domain/invitation"
 	membershipdomain "github.com/example/iam-service/internal/domain/membership"
+	"github.com/example/iam-service/internal/domain/role"
 	"github.com/example/iam-service/internal/ports"
 )
 
@@ -38,24 +40,33 @@ type Service struct {
 	invitations ports.InvitationRepository
 	memberships ports.MembershipRepository
 	tx          ports.Transactor
-	ttl         time.Duration
+	roles       *approle.AssignmentService
+	// defaultRoleKey 是非首个成员加入时绑定的角色标识。
+	defaultRoleKey string
+	ttl            time.Duration
 	// now 注入时钟，便于测试有效期相关分支。
 	now func() time.Time
 }
 
 // NewService 构造邀请用例服务，ttl 为邀请有效期。
+//
+// defaultRoleKey 必须能在租户的系统角色中找到，否则接受邀请会失败（快速暴露配置错误）。
 func NewService(
 	invitations ports.InvitationRepository,
 	memberships ports.MembershipRepository,
 	tx ports.Transactor,
+	roles *approle.AssignmentService,
+	defaultRoleKey string,
 	ttl time.Duration,
 ) *Service {
 	return &Service{
-		invitations: invitations,
-		memberships: memberships,
-		tx:          tx,
-		ttl:         ttl,
-		now:         time.Now,
+		invitations:    invitations,
+		memberships:    memberships,
+		tx:             tx,
+		roles:          roles,
+		defaultRoleKey: defaultRoleKey,
+		ttl:            ttl,
+		now:            time.Now,
 	}
 }
 
@@ -196,12 +207,34 @@ func (s *Service) Accept(ctx context.Context, principal identity.Principal, invi
 			result = existing
 		}
 
+		// 绑定角色：首个加入的成员成为 owner，其余成员按默认角色加入；
+		// 已有角色的成员不会被覆盖，保证重复接受邀请的幂等性。
+		roleKey := s.defaultRoleKey
+		active, err := s.memberships.CountActiveByTenant(txCtx, inv.TenantID.String())
+		if err != nil {
+			return err
+		}
+		if active <= 1 {
+			roleKey = role.KeyOwner
+		}
+		if err := s.roles.AssignDefault(txCtx, inv.TenantID.String(), userID.String(), roleKey, userID); err != nil {
+			return err
+		}
+		if _, err := s.roles.BumpVersion(txCtx); err != nil {
+			return err
+		}
+
 		if err := inv.Accept(userID, s.now()); err != nil {
 			return err
 		}
 		return s.invitations.Update(txCtx, inv)
 	})
 	if err != nil {
+		return nil, err
+	}
+
+	// 提交后再刷新本地内存策略，保证新成员的权限立即生效。
+	if err := s.roles.Reload(ctx); err != nil {
 		return nil, err
 	}
 	return result, nil

@@ -12,7 +12,7 @@ import (
 	"github.com/example/iam-service/internal/transport/http/responses"
 )
 
-// NewRouter 装配中间件与健康检查、平台管理、租户、成员、邀请路由。
+// NewRouter 装配中间件与健康检查、平台管理、租户、成员、邀请、角色路由。
 //
 // 中间件顺序固定为 RequestID → Logging，保证日志与错误响应都能携带 request_id。
 // 健康检查不挂载认证中间件，避免容器探针被拦截；
@@ -31,6 +31,7 @@ func NewRouter(app *bootstrap.App) *gin.Engine {
 	registerPlatformRoutes(v1, app)
 	registerTenantRoutes(v1, app)
 	registerInvitationSelfRoutes(v1, app)
+	registerCatalogRoutes(v1, app)
 
 	// 未匹配路由同样返回统一错误格式，避免泄漏 Gin 默认文本响应。
 	r.NoRoute(func(c *gin.Context) {
@@ -48,28 +49,53 @@ func registerPlatformRoutes(v1 *gin.RouterGroup, app *bootstrap.App) {
 	platform.POST("/tenants", handler.CreateTenant)
 }
 
-// registerTenantRoutes 注册租户与成员路由（租户成员可见）。
+// registerCatalogRoutes 注册系统级只读目录路由。
+func registerCatalogRoutes(v1 *gin.RouterGroup, app *bootstrap.App) {
+	permissions := handlers.NewPermissionHandler(app.RoleService)
+	authorize := handlers.NewAuthorizeHandler(app.Authorization)
+
+	v1.GET("/permissions", permissions.ListPermissions)
+	// 统一授权判定：身份只来自已验证令牌，请求体只能声明要判断什么。
+	v1.POST("/authorize", authorize.Authorize)
+}
+
+// registerTenantRoutes 注册租户、成员与角色路由。
+//
+// **权限必须逐条显式挂载**：若对整个分组挂一个宽松权限，viewer 之类的只读角色
+// 会拿到写权限。每条路由都挂 TenantGuard + RequirePermission 两道中间件，
+// 前者校验成员资格与租户状态，后者校验细粒度权限。
 func registerTenantRoutes(v1 *gin.RouterGroup, app *bootstrap.App) {
 	tenants := handlers.NewTenantHandler(app.Tenants, app.Access)
-	members := handlers.NewMemberHandler(app.MemberService)
+	members := handlers.NewMemberHandler(app.MemberService, app.AssignmentService)
 	invitations := handlers.NewInvitationHandler(app.InvitationService)
+	roles := handlers.NewRoleHandler(app.RoleService)
 
 	v1.GET("/tenants", tenants.ListMyTenants)
 
 	scoped := v1.Group("/tenants/:tenantID")
 	scoped.Use(middleware.TenantGuard(app.Access))
 	{
-		scoped.GET("", tenants.GetTenant)
-		scoped.PATCH("", tenants.UpdateTenant)
+		scoped.GET("", guard(app, "tenant", "read"), tenants.GetTenant)
+		scoped.PATCH("", guard(app, "tenant", "update"), tenants.UpdateTenant)
 
-		scoped.GET("/members", members.ListMembers)
-		scoped.GET("/members/:userID", members.GetMember)
-		scoped.PATCH("/members/:userID", members.UpdateMemberStatus)
-		scoped.DELETE("/members/:userID", members.RemoveMember)
+		scoped.GET("/members", guard(app, "member", "read"), members.ListMembers)
+		scoped.GET("/members/:userID", guard(app, "member", "read"), members.GetMember)
+		scoped.PATCH("/members/:userID", guard(app, "member", "update"), members.UpdateMemberStatus)
+		scoped.DELETE("/members/:userID", guard(app, "member", "remove"), members.RemoveMember)
 
-		scoped.POST("/invitations", invitations.CreateInvitation)
-		scoped.GET("/invitations", invitations.ListInvitations)
-		scoped.DELETE("/invitations/:invitationID", invitations.CancelInvitation)
+		scoped.GET("/members/:userID/roles", guard(app, "role", "read"), members.GetMemberRoles)
+		scoped.PUT("/members/:userID/roles", guard(app, "role", "assign"), members.SetMemberRoles)
+
+		scoped.POST("/invitations", guard(app, "member", "invite"), invitations.CreateInvitation)
+		scoped.GET("/invitations", guard(app, "member", "read"), invitations.ListInvitations)
+		scoped.DELETE("/invitations/:invitationID", guard(app, "member", "invite"), invitations.CancelInvitation)
+
+		scoped.GET("/roles", guard(app, "role", "read"), roles.ListRoles)
+		scoped.POST("/roles", guard(app, "role", "create"), roles.CreateRole)
+		scoped.GET("/roles/:roleID", guard(app, "role", "read"), roles.GetRole)
+		scoped.PATCH("/roles/:roleID", guard(app, "role", "update"), roles.UpdateRole)
+		scoped.DELETE("/roles/:roleID", guard(app, "role", "delete"), roles.DeleteRole)
+		scoped.PUT("/roles/:roleID/permissions", guard(app, "permission", "assign"), roles.SetRolePermissions)
 	}
 }
 
@@ -79,4 +105,12 @@ func registerInvitationSelfRoutes(v1 *gin.RouterGroup, app *bootstrap.App) {
 
 	v1.GET("/invitations/pending", invitations.ListPendingForMe)
 	v1.POST("/invitations/:invitationID/accept", invitations.AcceptInvitation)
+}
+
+// guard 为单条路由挂载权限校验中间件。
+//
+// 独立成函数是为了让"资源 + 操作"在路由表里一目了然，
+// 也便于通过测试枚举已注册路由，发现漏挂权限的路由。
+func guard(app *bootstrap.App, resource, action string) gin.HandlerFunc {
+	return middleware.RequirePermission(app.Authorization, resource, action)
 }

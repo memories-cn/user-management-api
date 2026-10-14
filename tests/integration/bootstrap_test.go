@@ -257,7 +257,11 @@ func TestAppCheckFailsWhenDatabaseUnreachable(t *testing.T) {
 	enforcer, err := bootstrap.NewEnforcer(db, modelPath)
 	require.NoError(t, err)
 
-	app := &bootstrap.App{DB: db, Enforcer: enforcer}
+	// 授权器依赖策略版本号，就绪检查会读取其刷新状态，必须一并装配。
+	authorizer, err := bootstrap.NewAuthorizer(enforcer, bootstrap.NewPolicyRepository(db), time.Second)
+	require.NoError(t, err)
+
+	app := &bootstrap.App{DB: db, Enforcer: enforcer, Authorizer: authorizer}
 	require.NoError(t, app.Check(context.Background()))
 
 	sqlDB, err := db.DB()
@@ -268,7 +272,7 @@ func TestAppCheckFailsWhenDatabaseUnreachable(t *testing.T) {
 }
 
 // assertEnforce 断言授权判定结果。
-func assertEnforce(t *testing.T, e *casbin.Enforcer, sub, dom, obj, act string, want bool, msgAndArgs ...any) {
+func assertEnforce(t *testing.T, e *casbin.SyncedEnforcer, sub, dom, obj, act string, want bool, msgAndArgs ...any) {
 	t.Helper()
 
 	allowed, err := e.Enforce(sub, dom, obj, act)

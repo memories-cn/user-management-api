@@ -10,10 +10,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	approle "github.com/example/iam-service/internal/application/role"
 	"github.com/example/iam-service/internal/domain/identity"
 	invitationdomain "github.com/example/iam-service/internal/domain/invitation"
 	membershipdomain "github.com/example/iam-service/internal/domain/membership"
+	domainrole "github.com/example/iam-service/internal/domain/role"
 	"github.com/example/iam-service/internal/ports"
+	"github.com/example/iam-service/internal/rbactest"
 )
 
 const testTTL = 7 * 24 * time.Hour
@@ -149,11 +152,19 @@ func (f *fakeTx) WithinTx(ctx context.Context, fn func(ctx context.Context) erro
 }
 
 // newTestService 构造用例服务与依赖替身。
-func newTestService() (*Service, *fakeInvitations, *fakeMemberships) {
+//
+// 授权域依赖使用真实用例 + 内存仓储替身（rbactest），
+// 既避免为接受邀请流程重复实现一整套 RBAC 假实现，也能断言角色绑定确实发生。
+func newTestService() (*Service, *fakeInvitations, *fakeMemberships, *rbactest.Fixture) {
 	invitations := newFakeInvitations()
 	memberships := newFakeMemberships()
-	svc := NewService(invitations, memberships, &fakeTx{}, testTTL)
-	return svc, invitations, memberships
+
+	fix := rbactest.NewFixture()
+	assignments := approle.NewAssignmentService(
+		memberships, fix.Roles, fix.MembershipRoles, fix.Policies, fix.Tx, fix.Reloader)
+
+	svc := NewService(invitations, memberships, &fakeTx{}, assignments, domainrole.KeyMember, testTTL)
+	return svc, invitations, memberships, fix
 }
 
 // principal 构造已认证且邮箱已验证的身份。
@@ -168,7 +179,7 @@ func principal(userID uuid.UUID, email string, verified bool) identity.Principal
 }
 
 func TestInvite_CreatesInvitation(t *testing.T) {
-	svc, _, _ := newTestService()
+	svc, _, _, _ := newTestService()
 	tenantID, actor := uuid.New(), uuid.New()
 
 	result, err := svc.Invite(context.Background(), actor, tenantID, "Alice@Example.com")
@@ -181,7 +192,7 @@ func TestInvite_CreatesInvitation(t *testing.T) {
 }
 
 func TestInvite_IsIdempotent(t *testing.T) {
-	svc, invitations, _ := newTestService()
+	svc, invitations, _, _ := newTestService()
 	tenantID, actor := uuid.New(), uuid.New()
 	ctx := context.Background()
 
@@ -204,7 +215,7 @@ func TestInvite_IsIdempotent(t *testing.T) {
 }
 
 func TestInvite_RejectsAlreadyAccepted(t *testing.T) {
-	svc, invitations, _ := newTestService()
+	svc, invitations, _, _ := newTestService()
 	tenantID, actor := uuid.New(), uuid.New()
 	ctx := context.Background()
 
@@ -219,9 +230,10 @@ func TestInvite_RejectsAlreadyAccepted(t *testing.T) {
 }
 
 func TestAccept_BindsVerifiedIdentity(t *testing.T) {
-	svc, _, memberships := newTestService()
+	svc, _, memberships, fix := newTestService()
 	tenantID, actor, userID := uuid.New(), uuid.New(), uuid.New()
 	ctx := context.Background()
+	fix.SeedSystemRoles(tenantID)
 
 	invited, err := svc.Invite(ctx, actor, tenantID, "alice@example.com")
 	require.NoError(t, err)
@@ -232,10 +244,18 @@ func TestAccept_BindsVerifiedIdentity(t *testing.T) {
 	assert.Equal(t, membershipdomain.StatusActive, m.Status)
 	assert.Equal(t, tenantID, m.TenantID)
 	assert.Len(t, memberships.items, 1)
+
+	// 首个接受邀请的成员必须绑定为 owner，并写入 Casbin g 规则。
+	fix.MembershipRoles.RegisterMembership(m.ID.String(), tenantID.String(), userID.String(), true)
+	roles, err := fix.MembershipRoles.ListRoles(ctx, tenantID.String(), m.ID.String())
+	require.NoError(t, err)
+	require.Len(t, roles, 1)
+	assert.Equal(t, domainrole.KeyOwner, roles[0].Key)
+	assert.Len(t, fix.Policies.MemberRules(tenantID.String(), userID.String()), 1)
 }
 
 func TestAccept_RejectsUnverifiedEmail(t *testing.T) {
-	svc, _, memberships := newTestService()
+	svc, _, memberships, _ := newTestService()
 	tenantID, actor, userID := uuid.New(), uuid.New(), uuid.New()
 	ctx := context.Background()
 
@@ -249,7 +269,7 @@ func TestAccept_RejectsUnverifiedEmail(t *testing.T) {
 }
 
 func TestAccept_RejectsEmailMismatch(t *testing.T) {
-	svc, _, memberships := newTestService()
+	svc, _, memberships, _ := newTestService()
 	tenantID, actor, userID := uuid.New(), uuid.New(), uuid.New()
 	ctx := context.Background()
 
@@ -263,7 +283,7 @@ func TestAccept_RejectsEmailMismatch(t *testing.T) {
 }
 
 func TestAccept_RejectsWrongToken(t *testing.T) {
-	svc, _, memberships := newTestService()
+	svc, _, memberships, _ := newTestService()
 	tenantID, actor, userID := uuid.New(), uuid.New(), uuid.New()
 	ctx := context.Background()
 
@@ -277,7 +297,7 @@ func TestAccept_RejectsWrongToken(t *testing.T) {
 }
 
 func TestAccept_RejectsExpired(t *testing.T) {
-	svc, _, memberships := newTestService()
+	svc, _, memberships, _ := newTestService()
 	tenantID, actor, userID := uuid.New(), uuid.New(), uuid.New()
 	ctx := context.Background()
 
@@ -294,7 +314,7 @@ func TestAccept_RejectsExpired(t *testing.T) {
 }
 
 func TestAccept_RejectsCancelled(t *testing.T) {
-	svc, _, _ := newTestService()
+	svc, _, _, _ := newTestService()
 	tenantID, actor, userID := uuid.New(), uuid.New(), uuid.New()
 	ctx := context.Background()
 
@@ -308,9 +328,10 @@ func TestAccept_RejectsCancelled(t *testing.T) {
 }
 
 func TestAccept_IsIdempotent(t *testing.T) {
-	svc, _, memberships := newTestService()
+	svc, _, memberships, fix := newTestService()
 	tenantID, actor, userID := uuid.New(), uuid.New(), uuid.New()
 	ctx := context.Background()
+	fix.SeedSystemRoles(tenantID)
 
 	invited, err := svc.Invite(ctx, actor, tenantID, "alice@example.com")
 	require.NoError(t, err)
@@ -326,9 +347,10 @@ func TestAccept_IsIdempotent(t *testing.T) {
 }
 
 func TestAccept_RejoinsRemovedMember(t *testing.T) {
-	svc, _, memberships := newTestService()
+	svc, _, memberships, fix := newTestService()
 	tenantID, actor, userID := uuid.New(), uuid.New(), uuid.New()
 	ctx := context.Background()
+	fix.SeedSystemRoles(tenantID)
 
 	// 场景：邀请待接受，但该用户此前曾加入后又被移除（软删除保留行）。
 	removed, err := membershipdomain.NewMembership(tenantID, userID)
@@ -350,7 +372,7 @@ func TestAccept_RejoinsRemovedMember(t *testing.T) {
 // 保留以下辅助函数用于需要重建邀请的场景。
 
 func TestAccept_RejectsUnauthenticated(t *testing.T) {
-	svc, _, _ := newTestService()
+	svc, _, _, _ := newTestService()
 	tenantID, actor := uuid.New(), uuid.New()
 	ctx := context.Background()
 
@@ -363,7 +385,7 @@ func TestAccept_RejectsUnauthenticated(t *testing.T) {
 }
 
 func TestCancel_IsTenantScoped(t *testing.T) {
-	svc, _, _ := newTestService()
+	svc, _, _, _ := newTestService()
 	tenantID, otherTenant, actor := uuid.New(), uuid.New(), uuid.New()
 	ctx := context.Background()
 

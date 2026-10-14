@@ -8,10 +8,11 @@ import (
 	"gorm.io/gorm"
 )
 
-// schemaMigrationsTable 与 casbinRuleTable 是启动期必须存在的表。
+// schemaMigrationsTable、casbinRuleTable 与 policyVersionTable 是启动期必须存在的表。
 const (
 	schemaMigrationsTable = "schema_migrations"
 	casbinRuleTable       = "casbin_rule"
+	policyVersionTable    = "policy_version"
 )
 
 // VerifyMigrations 校验数据库迁移状态。
@@ -44,12 +45,14 @@ func VerifyMigrations(ctx context.Context, db *gorm.DB) error {
 		return fmt.Errorf("迁移处于 dirty 状态（version=%d），需人工修复后再启动", state.Version)
 	}
 
-	exists, err = tableExists(ctx, db, casbinRuleTable)
-	if err != nil {
-		return err
-	}
-	if !exists {
-		return fmt.Errorf("未发现 %s 表，请先执行数据库迁移", casbinRuleTable)
+	for _, table := range []string{casbinRuleTable, policyVersionTable} {
+		exists, err := tableExists(ctx, db, table)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("未发现 %s 表，请先执行数据库迁移", table)
+		}
 	}
 	return nil
 }

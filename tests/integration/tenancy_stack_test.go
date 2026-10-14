@@ -27,6 +27,8 @@ const (
 	platformAdminRole    = "platform_admin"
 	tenancyModelPath     = "../../casbin/model.conf"
 	tenancyInvitationTTL = 7 * 24 * time.Hour
+	// tenancyPolicyRefresh 是策略失效检查间隔，集成测试用短间隔减少等待。
+	tenancyPolicyRefresh = 50 * time.Millisecond
 )
 
 // tenancyStack 是在真实 PostgreSQL 与 OIDC 桩之上装配的完整服务栈。
@@ -40,6 +42,9 @@ type tenancyStack struct {
 }
 
 // newTenancyStack 装配与生产一致的路由，用于端到端验证。
+//
+// 装配顺序与 bootstrap.New 一致：策略仓储 → 授权器 → 角色用例 → 租户域用例，
+// 保证集成测试覆盖的依赖图与生产完全相同。
 func newTenancyStack(t *testing.T) *tenancyStack {
 	t.Helper()
 
@@ -55,11 +60,13 @@ func newTenancyStack(t *testing.T) *tenancyStack {
 
 	stub := oidctest.New(t)
 	cfg := config.Config{
-		DatabaseDSN:          dsn,
-		ZitadelIssuer:        stub.Issuer(),
-		ZitadelAPIAudience:   tenancyAudience,
-		PlatformAdminRoleKey: platformAdminRole,
-		InvitationTTL:        tenancyInvitationTTL,
+		DatabaseDSN:           dsn,
+		ZitadelIssuer:         stub.Issuer(),
+		ZitadelAPIAudience:    tenancyAudience,
+		PlatformAdminRoleKey:  platformAdminRole,
+		InvitationTTL:         tenancyInvitationTTL,
+		PolicyRefreshInterval: tenancyPolicyRefresh,
+		DefaultMemberRoleKey:  "member",
 	}
 
 	verifier, err := bootstrap.NewTokenVerifier(context.Background(), cfg)
@@ -72,14 +79,27 @@ func newTenancyStack(t *testing.T) *tenancyStack {
 	tenants := bootstrap.NewTenantRepository(db)
 	memberships := bootstrap.NewMembershipRepository(db)
 	invitations := bootstrap.NewInvitationRepository(db)
+	permissions := bootstrap.NewPermissionRepository(db)
+	roles := bootstrap.NewRoleRepository(db)
+	membershipRoles := bootstrap.NewMembershipRoleRepository(db)
+	policies := bootstrap.NewPolicyRepository(db)
 	tx := bootstrap.NewTxManager(db)
 
-	creator, members, invitationSvc, access := bootstrap.NewTenancyServices(
-		tenants, memberships, invitations, tx, cfg)
+	authorizer, err := bootstrap.NewAuthorizer(enforcer, policies, cfg.PolicyRefreshInterval)
+	require.NoError(t, err)
+
+	roleSvc := bootstrap.NewRoleService(roles, permissions, policies, tx, authorizer)
+	assignmentSvc := bootstrap.NewAssignmentService(
+		memberships, roles, membershipRoles, policies, tx, authorizer)
+
+	services := bootstrap.NewTenancyServices(
+		tenants, memberships, invitations, membershipRoles, policies,
+		assignmentSvc, roleSvc, tx, authorizer, cfg)
 
 	app := &bootstrap.App{
 		DB:                db,
 		Enforcer:          enforcer,
+		Authorizer:        authorizer,
 		Verifier:          verifier,
 		Users:             users,
 		UserSync:          bootstrap.NewUserSync(users),
@@ -87,10 +107,17 @@ func newTenancyStack(t *testing.T) *tenancyStack {
 		Tenants:           tenants,
 		Memberships:       memberships,
 		Invitations:       invitations,
-		TenantCreator:     creator,
-		MemberService:     members,
-		InvitationService: invitationSvc,
-		Access:            access,
+		Permissions:       permissions,
+		Roles:             roles,
+		MembershipRoles:   membershipRoles,
+		Policies:          policies,
+		TenantCreator:     services.TenantCreator,
+		MemberService:     services.MemberService,
+		InvitationService: services.InvitationService,
+		Access:            services.Access,
+		RoleService:       roleSvc,
+		AssignmentService: assignmentSvc,
+		Authorization:     bootstrap.NewAuthorizationService(services.Access, authorizer),
 		PlatformAdmin:     policy,
 	}
 

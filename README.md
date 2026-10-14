@@ -1,9 +1,11 @@
 # IAM Service
 
 基于 ZITADEL 的多租户用户管理与授权微服务。当前已完成 **Milestone 1（可运行骨架）**、
-**Milestone 2（ZITADEL 身份接入）** 与 **Milestone 3（租户与成员）**：服务可启动、可执行迁移、
-可校验 JWT 访问令牌并按需同步本地用户，支持平台管理员创建租户与"先认证、后绑定"的成员邀请；
-租户内角色与细粒度权限（RBAC/Casbin 判定）尚未实现。
+**Milestone 2（ZITADEL 身份接入）**、**Milestone 3（租户与成员）** 与 **Milestone 4（租户内 RBAC）**：
+服务可启动、可执行迁移、可校验 JWT 访问令牌并按需同步本地用户，支持平台管理员创建租户、
+"先认证、后绑定"的成员邀请，以及租户内角色、权限配置与统一授权判定（`POST /api/v1/authorize`）。
+
+审计表、平台管理控制台与生产加固（限流、压测、备份恢复）属于后续里程碑。
 
 ## 技术栈
 
@@ -55,6 +57,8 @@ curl -i -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/me
 | `AUTH_JWKS_CACHE_TTL` | 否 | `15m` | **仅解析不生效**，密钥缓存与轮换由 go-oidc 内部策略决定 |
 | `PLATFORM_ADMIN_ROLE_KEY` | 否 | `platform_admin` | 平台管理员对应的 ZITADEL 角色名，置空则启动失败 |
 | `INVITATION_TTL` | 否 | `168h`（7 天） | 成员邀请有效期 |
+| `POLICY_REFRESH_INTERVAL` | 否 | `5s` | 跨实例策略失效检查间隔，必须为正；见下方"撤权时效" |
+| `DEFAULT_MEMBER_ROLE_KEY` | 否 | `member` | 非首个成员加入租户时绑定的默认角色，必须是系统预置角色之一 |
 | `CASBIN_MODEL_PATH` | 否 | `./casbin/model.conf` | Casbin 模型文件 |
 | `LOG_LEVEL` | 否 | `info` | `debug` / `info` / `warn` / `error` |
 
@@ -109,6 +113,15 @@ make down
 - **成员邀请：先认证、后绑定**：邀请只绑定已认证且 `email_verified=true` 且邮箱匹配的身份；不会因为一个邮箱字符串创建可登录用户。有效期 7 天，重复邀请与重复接受均幂等。
 - **租户隔离**：非成员与租户不存在都返回 `404`（防枚举）；租户停用返回 `403 TENANT_SUSPENDED`；成员非 active 返回 `403 MEMBERSHIP_INACTIVE`。租户标识只从路径参数读取，不信任任何请求头。
 - **软删除**：成员移除只改状态（`removed`），保留 `(tenant_id, user_id)` 唯一约束，重新邀请走"重新激活"。
+- **租户内 RBAC**：授权判定四元组为 `(subject, tenant, resource, action)`，Casbin 模型的 `dom` 即业务租户 ID。**未定义权限一律拒绝**；判定前必须先通过"用户有效 + 租户有效 + 成员关系有效"的数据库校验，Casbin 的 Allow 不能替代租户隔离。
+- **权限目录由系统维护**：权限集合随迁移种子（`000006`）变更，租户只能在既有集合内组合自定义角色，**没有新建权限的接口**。
+- **系统预置角色**：租户创建时自动预置 `owner`/`admin`/`member`/`viewer`。它们不可删除、不可改 `key`，只能调整展示信息与权限集合；首个接受邀请的成员自动绑定为 `owner`，其余成员按 `DEFAULT_MEMBER_ROLE_KEY` 绑定。
+- **管理员保护**：不能移除最后一个有效 Owner，不能删除仍被成员使用的角色，不能通过批量接口绕过单项权限检查。
+- **撤权时效（重要）**：
+  - 成员移除、成员停用、租户停用 → **立即生效**，因为这些路径每次请求都直查数据库，不依赖缓存；
+  - 角色权限矩阵变更 → 本实例提交后立即生效，其他实例最长滞后 `POLICY_REFRESH_INTERVAL`（默认 5s）；
+  - 多实例部署当前依赖"策略版本号 + 轮询"，Redis pub/sub watcher 属于后续阶段。
+- **策略与业务数据的原子性**：`casbin_rule` 是业务关系的投影，由 `PolicyRepository` 在**同一个事务**内写入；事务回滚后不会残留策略（即不会出现"业务已回滚但授权仍放行"）。
 
 ## 接口一览
 
@@ -118,21 +131,46 @@ make down
 | GET | `/api/v1/me` | 已认证 |
 | POST | `/api/v1/platform/tenants` | 平台管理员（`platform_admin` 角色） |
 | GET | `/api/v1/tenants` | 已认证（返回我所属的租户） |
-| GET/PATCH | `/api/v1/tenants/:tenantID` | 租户成员 |
-| GET | `/api/v1/tenants/:tenantID/members` | 租户成员 |
-| GET/PATCH/DELETE | `/api/v1/tenants/:tenantID/members/:userID` | 租户成员 |
-| POST/GET | `/api/v1/tenants/:tenantID/invitations` | 租户成员 |
-| DELETE | `/api/v1/tenants/:tenantID/invitations/:invitationID` | 租户成员 |
+| GET | `/api/v1/permissions` | 已认证（系统权限目录，只读） |
+| POST | `/api/v1/authorize` | 已认证（统一授权判定） |
+| GET | `/api/v1/tenants/:tenantID` | 租户成员 + `tenant:read` |
+| PATCH | `/api/v1/tenants/:tenantID` | 租户成员 + `tenant:update` |
+| GET | `/api/v1/tenants/:tenantID/members` | 租户成员 + `member:read` |
+| GET | `/api/v1/tenants/:tenantID/members/:userID` | 租户成员 + `member:read` |
+| PATCH | `/api/v1/tenants/:tenantID/members/:userID` | 租户成员 + `member:update` |
+| DELETE | `/api/v1/tenants/:tenantID/members/:userID` | 租户成员 + `member:remove` |
+| GET | `/api/v1/tenants/:tenantID/members/:userID/roles` | 租户成员 + `role:read` |
+| PUT | `/api/v1/tenants/:tenantID/members/:userID/roles` | 租户成员 + `role:assign` |
+| POST | `/api/v1/tenants/:tenantID/invitations` | 租户成员 + `member:invite` |
+| GET | `/api/v1/tenants/:tenantID/invitations` | 租户成员 + `member:read` |
+| DELETE | `/api/v1/tenants/:tenantID/invitations/:invitationID` | 租户成员 + `member:invite` |
+| GET/POST | `/api/v1/tenants/:tenantID/roles` | 租户成员 + `role:read` / `role:create` |
+| GET/PATCH/DELETE | `/api/v1/tenants/:tenantID/roles/:roleID` | 租户成员 + `role:read` / `role:update` / `role:delete` |
+| PUT | `/api/v1/tenants/:tenantID/roles/:roleID/permissions` | 租户成员 + `permission:assign` |
 | GET | `/api/v1/invitations/pending` | 已认证（按已验证邮箱过滤） |
 | POST | `/api/v1/invitations/:invitationID/accept` | 已认证 |
+
+统一授权判定：
+
+```bash
+curl -X POST http://localhost:8080/api/v1/authorize \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"tenant_id":"<uuid>","resource":"member","action":"invite"}'
+# 200 {"data":{"allowed":true,...}}
+# 业务性拒绝（非成员、无权限、租户停用）返回 200 + allowed=false，避免枚举租户是否存在；
+# 依赖不可用返回 503 —— 调用方必须失败关闭，不能把 503 当成"无权限"后自行放行。
+```
+
+> 请求体**只能**声明要判断的租户、资源与操作，调用者身份一律来自已验证令牌。
 
 ## 已知限制（本阶段）
 
 - `/members` 只返回 `user_id`，尚未提供邮箱/展示名映射，该能力随用户目录接口在后续里程碑补齐。
 - 租户停用/删除接口与平台管理员管理界面尚未提供，当前只能在数据库侧变更状态。
 - 邀请令牌通过创建响应返回，生产环境需改为邮件投递。
-- 平台管理操作目前只记录结构化日志，审计表在后续里程碑落地。
+- 平台管理与角色/权限变更操作目前只记录结构化日志，审计表在后续里程碑落地。
 - **默认拒绝**：Casbin 模型中 `dom` 即业务租户 ID，未定义权限一律拒绝。
+- **多实例策略失效**：当前使用"策略版本号 + 轮询"，最长滞后 `POLICY_REFRESH_INTERVAL`；Redis pub/sub watcher 属于后续阶段。
 - **迁移不随启动执行**：见上文"数据库迁移"。
 
 ## 目录结构

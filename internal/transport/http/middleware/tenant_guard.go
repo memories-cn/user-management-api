@@ -74,6 +74,9 @@ func TenantGuard(access TenantAccessChecker) gin.HandlerFunc {
 }
 
 // handleTenantAccessError 把租户访问校验失败映射为合适的状态码。
+//
+// 分支顺序体现失败关闭原则：只有明确属于"业务性拒绝"的错误才返回 404，
+// 其余（数据库不可用等）一律 503，避免把故障伪装成"资源不存在"掩盖可用性问题。
 func handleTenantAccessError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, tenancy.ErrTenantSuspended):
@@ -82,10 +85,13 @@ func handleTenantAccessError(c *gin.Context, err error) {
 	case errors.Is(err, tenancy.ErrMembershipInactive):
 		slog.WarnContext(c.Request.Context(), "membership inactive", "error", err)
 		responses.Fail(c, http.StatusForbidden, CodeMembershipInactive, "membership is not active")
-	default:
-		// 租户不存在与非成员都按未找到处理，服务端日志保留真实原因。
+	case errors.Is(err, tenancy.ErrTenantNotFound):
+		// 租户不存在与非成员都按未找到处理，避免通过状态码枚举租户是否存在。
 		slog.WarnContext(c.Request.Context(), "tenant access denied", "error", err)
 		responses.Fail(c, http.StatusNotFound, CodeNotFound, "resource not found")
+	default:
+		slog.ErrorContext(c.Request.Context(), "租户访问校验依赖不可用", "error", err)
+		responses.Fail(c, http.StatusServiceUnavailable, CodeDependencyUnavailable, "authorization service unavailable")
 	}
 	c.Abort()
 }

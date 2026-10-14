@@ -61,6 +61,12 @@ func run() error {
 		}
 	}()
 
+	// 跨实例策略失效：按固定间隔比对全局策略版本号并重载本地内存策略。
+	// 协程生命周期与进程一致，由下面的 shutdownCtx 取消。
+	refreshCtx, cancelRefresh := context.WithCancel(context.Background())
+	defer cancelRefresh()
+	app.Authorizer.StartRefresher(refreshCtx)
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           iamhttp.NewRouter(app),

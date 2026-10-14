@@ -36,6 +36,10 @@ const (
 	defaultPlatformAdminRoleKey = "platform_admin"
 	// defaultInvitationTTL 是成员邀请默认有效期：7 天。
 	defaultInvitationTTL = 7 * 24 * time.Hour
+	// defaultPolicyRefreshInterval 是策略失效检查间隔默认值：5 秒。
+	defaultPolicyRefreshInterval = 5 * time.Second
+	// defaultMemberRoleKey 是普通成员加入租户时的默认角色。
+	defaultMemberRoleKey = "member"
 
 	// 环境变量名集中定义，便于文档与测试引用。
 	EnvDatabaseDSN     = "DATABASE_DSN"
@@ -57,6 +61,11 @@ const (
 	EnvPlatformAdminRoleKey = "PLATFORM_ADMIN_ROLE_KEY"
 	// EnvInvitationTTL 指定成员邀请的有效期。
 	EnvInvitationTTL = "INVITATION_TTL"
+
+	// EnvPolicyRefreshInterval 指定跨实例策略失效检查间隔。
+	EnvPolicyRefreshInterval = "POLICY_REFRESH_INTERVAL"
+	// EnvDefaultMemberRoleKey 指定非首个成员加入租户时绑定的默认角色。
+	EnvDefaultMemberRoleKey = "DEFAULT_MEMBER_ROLE_KEY"
 )
 
 // Config 保存服务运行所需的全部配置。
@@ -93,6 +102,14 @@ type Config struct {
 	PlatformAdminRoleKey string
 	// InvitationTTL 是成员邀请的有效期。
 	InvitationTTL time.Duration
+
+	// PolicyRefreshInterval 是跨实例策略失效检查间隔。
+	// 角色权限矩阵变更在其他实例上的可见延迟不超过该值；
+	// 成员移除与停用不依赖该窗口（租户守卫每次请求直查数据库）。
+	PolicyRefreshInterval time.Duration
+	// DefaultMemberRoleKey 是非首个成员加入租户时绑定的默认角色标识，
+	// 必须是系统预置角色之一。
+	DefaultMemberRoleKey string
 }
 
 // Load 读取环境变量并返回校验后的配置。
@@ -114,8 +131,10 @@ func Load() (Config, error) {
 		AuthTokenMode:                 defaultTokenMode,
 		AuthJWKSCacheTTL:              defaultJWKSCacheTTL,
 
-		PlatformAdminRoleKey: defaultPlatformAdminRoleKey,
-		InvitationTTL:        defaultInvitationTTL,
+		PlatformAdminRoleKey:  defaultPlatformAdminRoleKey,
+		InvitationTTL:         defaultInvitationTTL,
+		PolicyRefreshInterval: defaultPolicyRefreshInterval,
+		DefaultMemberRoleKey:  defaultMemberRoleKey,
 	}
 
 	if cfg.DatabaseDSN == "" {
@@ -206,7 +225,50 @@ func loadTenancyConfig(cfg *Config) []error {
 		}
 	}
 
+	errs = append(errs, loadRBACConfig(cfg)...)
+
 	return errs
+}
+
+// loadRBACConfig 解析并校验角色与策略相关配置，返回全部错误。
+func loadRBACConfig(cfg *Config) []error {
+	var errs []error
+
+	if v := env(EnvPolicyRefreshInterval); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s 不是合法的时间段：%w", EnvPolicyRefreshInterval, err))
+		} else if d <= 0 {
+			errs = append(errs, fmt.Errorf("%s 必须大于 0", EnvPolicyRefreshInterval))
+		} else {
+			cfg.PolicyRefreshInterval = d
+		}
+	}
+
+	if raw, ok := os.LookupEnv(EnvDefaultMemberRoleKey); ok {
+		cfg.DefaultMemberRoleKey = strings.TrimSpace(raw)
+		if cfg.DefaultMemberRoleKey == "" {
+			errs = append(errs, fmt.Errorf("%s 不能为空", EnvDefaultMemberRoleKey))
+		}
+	}
+	if cfg.DefaultMemberRoleKey != "" && !isSystemRoleKey(cfg.DefaultMemberRoleKey) {
+		errs = append(errs, fmt.Errorf("%s 必须是系统预置角色之一（owner/admin/member/viewer）：%q",
+			EnvDefaultMemberRoleKey, cfg.DefaultMemberRoleKey))
+	}
+
+	return errs
+}
+
+// isSystemRoleKey 判断给定标识是否为系统预置角色。
+//
+// 此处不引用 domain/role 包，避免配置层反向依赖领域层。
+func isSystemRoleKey(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "owner", "admin", "member", "viewer":
+		return true
+	default:
+		return false
+	}
 }
 
 // loadZitadelConfig 解析并校验 ZITADEL 与令牌校验配置，返回全部错误。

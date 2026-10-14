@@ -86,7 +86,7 @@ func TestList_NormalizesPaging(t *testing.T) {
 }
 
 func TestGet_NotFound(t *testing.T) {
-	svc := NewService(newFakeRepo())
+	svc, _, _, _ := newTestService(newFakeRepo())
 
 	_, err := svc.Get(context.Background(), uuid.NewString(), uuid.NewString())
 
@@ -95,7 +95,7 @@ func TestGet_NotFound(t *testing.T) {
 
 func TestUpdateStatus_SuspendAndActivate(t *testing.T) {
 	repo := newFakeRepo()
-	svc := NewService(repo)
+	svc, _, _, _ := newTestService(repo)
 	tenantID := uuid.New()
 	m := seed(t, repo, tenantID)
 	ctx := context.Background()
@@ -111,7 +111,7 @@ func TestUpdateStatus_SuspendAndActivate(t *testing.T) {
 
 func TestUpdateStatus_RejectsInvalidStatus(t *testing.T) {
 	repo := newFakeRepo()
-	svc := NewService(repo)
+	svc, _, _, _ := newTestService(repo)
 	tenantID := uuid.New()
 	m := seed(t, repo, tenantID)
 
@@ -122,7 +122,7 @@ func TestUpdateStatus_RejectsInvalidStatus(t *testing.T) {
 
 func TestUpdateStatus_RejectsRemovedMember(t *testing.T) {
 	repo := newFakeRepo()
-	svc := NewService(repo)
+	svc, _, _, _ := newTestService(repo)
 	tenantID := uuid.New()
 	m := seed(t, repo, tenantID)
 	m.Remove()
@@ -135,7 +135,7 @@ func TestUpdateStatus_RejectsRemovedMember(t *testing.T) {
 
 func TestRemove_SoftDeletes(t *testing.T) {
 	repo := newFakeRepo()
-	svc := NewService(repo)
+	svc, _, _, _ := newTestService(repo)
 	tenantID := uuid.New()
 	first := seed(t, repo, tenantID)
 	seed(t, repo, tenantID)
@@ -151,7 +151,7 @@ func TestRemove_SoftDeletes(t *testing.T) {
 
 func TestRemove_ProtectsLastMember(t *testing.T) {
 	repo := newFakeRepo()
-	svc := NewService(repo)
+	svc, _, _, _ := newTestService(repo)
 	tenantID := uuid.New()
 	only := seed(t, repo, tenantID)
 
@@ -162,7 +162,7 @@ func TestRemove_ProtectsLastMember(t *testing.T) {
 
 func TestRemove_IsIdempotentForRemoved(t *testing.T) {
 	repo := newFakeRepo()
-	svc := NewService(repo)
+	svc, _, _, _ := newTestService(repo)
 	tenantID := uuid.New()
 	first := seed(t, repo, tenantID)
 	seed(t, repo, tenantID)

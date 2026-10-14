@@ -7,6 +7,8 @@ import (
 	"github.com/google/uuid"
 
 	appmembership "github.com/example/iam-service/internal/application/membership"
+	approle "github.com/example/iam-service/internal/application/role"
+	"github.com/example/iam-service/internal/domain/identity"
 	membershipdomain "github.com/example/iam-service/internal/domain/membership"
 	"github.com/example/iam-service/internal/transport/http/middleware"
 	"github.com/example/iam-service/internal/transport/http/responses"
@@ -20,14 +22,15 @@ type memberResponse struct {
 	JoinedAt string `json:"joined_at,omitempty"`
 }
 
-// MemberHandler 提供成员管理接口。
+// MemberHandler 提供成员管理与成员角色接口。
 type MemberHandler struct {
 	members *appmembership.Service
+	roles   *approle.AssignmentService
 }
 
 // NewMemberHandler 构造成员处理器。
-func NewMemberHandler(members *appmembership.Service) *MemberHandler {
-	return &MemberHandler{members: members}
+func NewMemberHandler(members *appmembership.Service, roles *approle.AssignmentService) *MemberHandler {
+	return &MemberHandler{members: members, roles: roles}
 }
 
 // ListMembers 返回租户成员列表。
@@ -101,6 +104,56 @@ func (h *MemberHandler) RemoveMember(c *gin.Context) {
 	}
 
 	responses.OK(c, map[string]string{"status": "removed"})
+}
+
+// GetMemberRoles 返回成员在租户内被授予的角色。
+func (h *MemberHandler) GetMemberRoles(c *gin.Context) {
+	tenantID, userID, ok := tenantAndUserID(c)
+	if !ok {
+		return
+	}
+
+	roles, err := h.roles.ListMemberRoles(c.Request.Context(), tenantID, userID)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+
+	responses.OK(c, toRoleResponses(roles))
+}
+
+// SetMemberRoles 用给定角色标识整体替换成员的角色。
+//
+// 操作者取自已认证身份，不接受请求体传入的分配者（docs/TDD.md 10.3）。
+func (h *MemberHandler) SetMemberRoles(c *gin.Context) {
+	tenantID, userID, ok := tenantAndUserID(c)
+	if !ok {
+		return
+	}
+
+	principal, ok := identity.FromContext(c.Request.Context())
+	if !ok || !principal.Authenticated {
+		responses.Fail(c, http.StatusUnauthorized, middleware.CodeUnauthenticated, "missing or invalid credentials")
+		return
+	}
+
+	// roles 必须出现，但允许为空数组——清空角色是一次合法的撤权操作。
+	// 因此这里不依赖 binding:"required"（它会把空数组也判为缺失）。
+	var req struct {
+		Roles []string `json:"roles"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.Roles == nil {
+		responses.Fail(c, http.StatusBadRequest, CodeInvalidArgument, "invalid request body")
+		return
+	}
+
+	roles, err := h.roles.SetMemberRoles(c.Request.Context(), tenantID, userID, req.Roles, actorID(principal))
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+
+	responses.OK(c, toRoleResponses(roles))
 }
 
 // tenantAndUserID 从上下文与路径参数中取出租户与用户标识。

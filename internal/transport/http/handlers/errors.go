@@ -9,9 +9,14 @@ import (
 
 	appinvitation "github.com/example/iam-service/internal/application/invitation"
 	appmembership "github.com/example/iam-service/internal/application/membership"
+	approle "github.com/example/iam-service/internal/application/role"
 	apptenant "github.com/example/iam-service/internal/application/tenant"
 	invitationdomain "github.com/example/iam-service/internal/domain/invitation"
+	permissiondomain "github.com/example/iam-service/internal/domain/permission"
+	roledomain "github.com/example/iam-service/internal/domain/role"
 	tenantdomain "github.com/example/iam-service/internal/domain/tenant"
+	"github.com/example/iam-service/internal/ports"
+	"github.com/example/iam-service/internal/transport/http/middleware"
 	"github.com/example/iam-service/internal/transport/http/responses"
 )
 
@@ -39,6 +44,25 @@ const (
 	CodeInvitationNotPending = "INVITATION_NOT_PENDING"
 	// CodeInternal 表示未预期的服务端错误。
 	CodeInternal = "INTERNAL"
+
+	// CodeForbidden 表示身份有效但权限不足。
+	CodeForbidden = "FORBIDDEN"
+	// CodeRoleNotFound 表示角色不存在或不属于当前租户。
+	CodeRoleNotFound = "ROLE_NOT_FOUND"
+	// CodeRoleKeyConflict 表示租户内已存在同名角色。
+	CodeRoleKeyConflict = "ROLE_KEY_CONFLICT"
+	// CodeRoleInUse 表示角色仍被成员使用。
+	CodeRoleInUse = "ROLE_IN_USE"
+	// CodeSystemRoleImmutable 表示系统预置角色不允许该变更。
+	CodeSystemRoleImmutable = "SYSTEM_ROLE_IMMUTABLE"
+	// CodeInvalidRoleKey 表示角色标识非法。
+	CodeInvalidRoleKey = "INVALID_ROLE_KEY"
+	// CodePermissionNotFound 表示权限不在系统权限目录中。
+	CodePermissionNotFound = "PERMISSION_NOT_FOUND"
+	// CodeCannotRemoveLastOwner 表示不能移除租户内最后一个有效所有者。
+	CodeCannotRemoveLastOwner = "CANNOT_REMOVE_LAST_OWNER"
+	// CodeMembershipInactive 表示成员关系不可用，不能分配角色。
+	CodeMembershipInactive = "MEMBERSHIP_INACTIVE"
 )
 
 // writeError 把用例层错误统一映射为 HTTP 状态码与错误码。
@@ -75,6 +99,39 @@ func writeError(c *gin.Context, err error) {
 		responses.Fail(c, http.StatusConflict, CodeInvitationExpired, "invitation is expired")
 	case errors.Is(err, invitationdomain.ErrNotPending):
 		responses.Fail(c, http.StatusConflict, CodeInvitationNotPending, "invitation is not pending")
+
+	// 角色与权限
+	case errors.Is(err, approle.ErrRoleNotFound):
+		responses.Fail(c, http.StatusNotFound, CodeRoleNotFound, "role not found")
+	case errors.Is(err, approle.ErrRoleKeyConflict):
+		responses.Fail(c, http.StatusConflict, CodeRoleKeyConflict, "role key already exists in this tenant")
+	case errors.Is(err, approle.ErrRoleInUse):
+		responses.Fail(c, http.StatusConflict, CodeRoleInUse, "role is still assigned to members")
+	case errors.Is(err, approle.ErrInvalidRoleKey):
+		responses.Fail(c, http.StatusBadRequest, CodeInvalidRoleKey, "invalid role key")
+	case errors.Is(err, approle.ErrPermissionNotFound):
+		responses.Fail(c, http.StatusBadRequest, CodePermissionNotFound, "permission is not in the system catalog")
+	case errors.Is(err, roledomain.ErrSystemRoleImmutable):
+		responses.Fail(c, http.StatusConflict, CodeSystemRoleImmutable, "system preset role cannot be changed")
+	case errors.Is(err, roledomain.ErrInvalidKey),
+		errors.Is(err, roledomain.ErrInvalidName),
+		errors.Is(err, roledomain.ErrInvalidTenantID):
+		responses.Fail(c, http.StatusBadRequest, CodeInvalidArgument, err.Error())
+	case errors.Is(err, permissiondomain.ErrInvalidCode),
+		errors.Is(err, permissiondomain.ErrInvalidResource),
+		errors.Is(err, permissiondomain.ErrInvalidAction):
+		responses.Fail(c, http.StatusBadRequest, CodePermissionNotFound, err.Error())
+
+	// 成员与角色分配
+	case errors.Is(err, approle.ErrMembershipNotFound):
+		responses.Fail(c, http.StatusNotFound, CodeNotFound, "resource not found")
+	case errors.Is(err, approle.ErrMembershipInactive):
+		responses.Fail(c, http.StatusForbidden, CodeMembershipInactive, "membership is not active")
+	case errors.Is(err, approle.ErrCannotRemoveLastOwner),
+		errors.Is(err, appmembership.ErrCannotRemoveLastOwner):
+		responses.Fail(c, http.StatusConflict, CodeCannotRemoveLastOwner, "cannot remove the last active owner")
+	case errors.Is(err, ports.ErrInvalidToken):
+		responses.Fail(c, http.StatusUnauthorized, middleware.CodeUnauthenticated, "missing or invalid credentials")
 
 	default:
 		slog.ErrorContext(c.Request.Context(), "unhandled error", "error", err)

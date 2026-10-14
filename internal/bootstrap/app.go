@@ -9,9 +9,12 @@ import (
 	"github.com/casbin/casbin/v3"
 	"gorm.io/gorm"
 
+	casbinadapter "github.com/example/iam-service/internal/adapters/casbin"
+	"github.com/example/iam-service/internal/application/authorization"
 	appinvitation "github.com/example/iam-service/internal/application/invitation"
 	appmembership "github.com/example/iam-service/internal/application/membership"
 	"github.com/example/iam-service/internal/application/platformadmin"
+	approle "github.com/example/iam-service/internal/application/role"
 	"github.com/example/iam-service/internal/application/tenancy"
 	apptenant "github.com/example/iam-service/internal/application/tenant"
 	appuser "github.com/example/iam-service/internal/application/user"
@@ -23,8 +26,10 @@ import (
 type App struct {
 	// DB 是业务与策略持久化的数据库句柄。
 	DB *gorm.DB
-	// Enforcer 是已加载策略的授权引擎，本阶段仅校验其可用，尚未接入业务判定。
-	Enforcer *casbin.Enforcer
+	// Enforcer 是已加载策略的授权引擎（并发安全）。
+	Enforcer *casbin.SyncedEnforcer
+	// Authorizer 执行统一授权判定与策略失效刷新。
+	Authorizer *casbinadapter.Authorizer
 	// Verifier 校验访问令牌。
 	Verifier ports.TokenVerifier
 	// Users 是用户仓储。
@@ -38,6 +43,11 @@ type App struct {
 	Tenants     ports.TenantRepository
 	Memberships ports.MembershipRepository
 	Invitations ports.InvitationRepository
+	// Permissions、Roles、MembershipRoles、Policies 是授权域仓储。
+	Permissions     ports.PermissionRepository
+	Roles           ports.RoleRepository
+	MembershipRoles ports.MembershipRoleRepository
+	Policies        ports.PolicyRepository
 
 	// TenantCreator 是平台管理员创建租户用例。
 	TenantCreator *apptenant.CreateService
@@ -47,6 +57,12 @@ type App struct {
 	InvitationService *appinvitation.Service
 	// Access 执行租户访问校验。
 	Access *tenancy.AccessService
+	// RoleService 提供角色与权限用例。
+	RoleService *approle.Service
+	// AssignmentService 提供成员角色分配用例。
+	AssignmentService *approle.AssignmentService
+	// Authorization 提供统一授权判定用例。
+	Authorization *authorization.Service
 	// PlatformAdmin 判定平台管理员。
 	PlatformAdmin *platformadmin.Policy
 }
@@ -86,13 +102,31 @@ func New(cfg config.Config) (*App, error) {
 	tenants := NewTenantRepository(db)
 	memberships := NewMembershipRepository(db)
 	invitations := NewInvitationRepository(db)
+	permissions := NewPermissionRepository(db)
+	roles := NewRoleRepository(db)
+	membershipRoles := NewMembershipRoleRepository(db)
+	policies := NewPolicyRepository(db)
 	tx := NewTxManager(db)
 
-	creator, members, invitationSvc, access := NewTenancyServices(tenants, memberships, invitations, tx, cfg)
+	// 授权器必须在用例之前构造：用例在策略提交后要靠它刷新本地内存策略。
+	authorizer, err := NewAuthorizer(enforcer, policies, cfg.PolicyRefreshInterval)
+	if err != nil {
+		closeDB(db)
+		return nil, err
+	}
+
+	roleSvc := NewRoleService(roles, permissions, policies, tx, authorizer)
+	assignmentSvc := NewAssignmentService(memberships, roles, membershipRoles, policies, tx, authorizer)
+
+	services := NewTenancyServices(
+		tenants, memberships, invitations, membershipRoles, policies,
+		assignmentSvc, roleSvc, tx, authorizer, cfg,
+	)
 
 	return &App{
 		DB:                db,
 		Enforcer:          enforcer,
+		Authorizer:        authorizer,
 		Verifier:          verifier,
 		Users:             users,
 		UserSync:          NewUserSync(users),
@@ -100,15 +134,22 @@ func New(cfg config.Config) (*App, error) {
 		Tenants:           tenants,
 		Memberships:       memberships,
 		Invitations:       invitations,
-		TenantCreator:     creator,
-		MemberService:     members,
-		InvitationService: invitationSvc,
-		Access:            access,
+		Permissions:       permissions,
+		Roles:             roles,
+		MembershipRoles:   membershipRoles,
+		Policies:          policies,
+		TenantCreator:     services.TenantCreator,
+		MemberService:     services.MemberService,
+		InvitationService: services.InvitationService,
+		Access:            services.Access,
+		RoleService:       roleSvc,
+		AssignmentService: assignmentSvc,
+		Authorization:     NewAuthorizationService(services.Access, authorizer),
 		PlatformAdmin:     platformAdmin,
 	}, nil
 }
 
-// Check 实现 handlers.ReadinessProbe：校验数据库连通性、迁移状态与策略加载情况。
+// Check 实现 handlers.ReadinessProbe：校验数据库连通性、迁移状态、策略加载与刷新情况。
 // 任一依赖不可用都返回错误，调用方应返回 503 而不是放行（fail closed）。
 func (a *App) Check(ctx context.Context) error {
 	sqlDB, err := a.DB.DB()
@@ -123,6 +164,10 @@ func (a *App) Check(ctx context.Context) error {
 	}
 	if a.Enforcer == nil || a.Enforcer.GetModel() == nil {
 		return errors.New("授权引擎策略未加载")
+	}
+	// 策略刷新失败意味着内存策略可能已过期，此时必须摘除流量而不是继续判定。
+	if err := a.Authorizer.LastError(); err != nil {
+		return fmt.Errorf("授权策略刷新失败：%w", err)
 	}
 	return nil
 }

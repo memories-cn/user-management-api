@@ -117,12 +117,25 @@ func TestTenantGuard_RejectsInactiveMembership(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), CodeMembershipInactive)
 }
 
-func TestTenantGuard_FailsClosedOnUnknownError(t *testing.T) {
+func TestTenantGuard_FailsClosedOnDependencyError(t *testing.T) {
 	access := &stubAccess{err: errors.New("database down")}
 
 	rec := getMembers(t, newTenantRouter(access, authedPrincipal()), testTenantUUID, nil)
 
-	require.Equal(t, http.StatusNotFound, rec.Code, "未预期错误仍不得放行")
+	// 依赖不可用必须返回 503 而不是 404：404 会把故障伪装成"资源不存在"，
+	// 既掩盖可用性问题，也让调用方无法区分"真的无权访问"与"服务不可用"。
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Contains(t, rec.Body.String(), CodeDependencyUnavailable)
+}
+
+func TestTenantGuard_HidesTenantExistence(t *testing.T) {
+	access := &stubAccess{err: tenancy.ErrTenantNotFound}
+
+	rec := getMembers(t, newTenantRouter(access, authedPrincipal()), testTenantUUID, nil)
+
+	// 租户不存在与非成员统一 404，避免通过状态码枚举租户是否存在。
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), CodeNotFound)
 }
 
 func TestTenantGuard_RejectsUnauthenticated(t *testing.T) {

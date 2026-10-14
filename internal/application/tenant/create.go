@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	appinvitation "github.com/example/iam-service/internal/application/invitation"
+	approle "github.com/example/iam-service/internal/application/role"
 	invitationdomain "github.com/example/iam-service/internal/domain/invitation"
 	tenantdomain "github.com/example/iam-service/internal/domain/tenant"
 	"github.com/example/iam-service/internal/ports"
@@ -38,18 +39,36 @@ type CreateResult struct {
 // 成员关系只能通过邀请并由被邀请人完成认证后建立。
 type CreateService struct {
 	tenants     ports.TenantRepository
+	policies    ports.PolicyRepository
 	tx          ports.Transactor
 	invitations *appinvitation.Service
+	roles       *approle.Service
+	reloader    ports.PolicyReloader
 }
 
 // NewCreateService 构造创建租户用例。
-func NewCreateService(tenants ports.TenantRepository, tx ports.Transactor, invitations *appinvitation.Service) *CreateService {
-	return &CreateService{tenants: tenants, tx: tx, invitations: invitations}
+func NewCreateService(
+	tenants ports.TenantRepository,
+	policies ports.PolicyRepository,
+	tx ports.Transactor,
+	invitations *appinvitation.Service,
+	roles *approle.Service,
+	reloader ports.PolicyReloader,
+) *CreateService {
+	return &CreateService{
+		tenants:     tenants,
+		policies:    policies,
+		tx:          tx,
+		invitations: invitations,
+		roles:       roles,
+		reloader:    reloader,
+	}
 }
 
-// Create 创建租户并为 owner 邮箱创建邀请。
+// Create 创建租户、为 owner 邮箱创建邀请，并预置系统角色与权限矩阵。
 //
-// 租户与邀请在同一事务内创建，避免出现"无 owner 邀请的孤儿租户"。
+// 租户、邀请、系统角色与其策略投影都在同一事务内创建，避免出现
+// "有租户但无角色"或"有角色但无策略"的中间状态（docs/TDD.md 8.3）。
 func (s *CreateService) Create(ctx context.Context, actor uuid.UUID, name, slug, ownerEmail string) (*CreateResult, error) {
 	if actor == uuid.Nil {
 		return nil, errors.New("创建者不能为空")
@@ -79,6 +98,14 @@ func (s *CreateService) Create(ctx context.Context, actor uuid.UUID, name, slug,
 			return err
 		}
 
+		// 预置系统角色与默认权限矩阵，保证首个接受邀请的成员能被绑定为 owner。
+		if err := s.roles.EnsureSystemRoles(txCtx, tn.ID); err != nil {
+			return err
+		}
+		if _, err := s.policies.BumpVersion(txCtx); err != nil {
+			return err
+		}
+
 		result = CreateResult{
 			Tenant:     tn,
 			Invitation: invited.Invitation,
@@ -89,6 +116,13 @@ func (s *CreateService) Create(ctx context.Context, actor uuid.UUID, name, slug,
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	// 策略已提交，立即刷新本地内存策略，保证新租户的权限判定即时可用。
+	if s.reloader != nil {
+		if err := s.reloader.RefreshIfStale(ctx); err != nil {
+			return nil, err
+		}
 	}
 
 	// 平台管理操作留痕：审计表在 Milestone 5 落地，此处先记结构化日志。

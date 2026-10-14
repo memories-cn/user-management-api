@@ -9,6 +9,7 @@ import (
 	appinvitation "github.com/example/iam-service/internal/application/invitation"
 	appmembership "github.com/example/iam-service/internal/application/membership"
 	"github.com/example/iam-service/internal/application/platformadmin"
+	approle "github.com/example/iam-service/internal/application/role"
 	"github.com/example/iam-service/internal/application/tenancy"
 	apptenant "github.com/example/iam-service/internal/application/tenant"
 	"github.com/example/iam-service/internal/config"
@@ -47,17 +48,44 @@ func NewPlatformAdminPolicy(cfg config.Config) (*platformadmin.Policy, error) {
 	return policy, nil
 }
 
+// TenancyServices 聚合租户域用例，避免装配函数返回过长的裸返回值列表。
+type TenancyServices struct {
+	// TenantCreator 是平台管理员创建租户用例。
+	TenantCreator *apptenant.CreateService
+	// MemberService 提供成员管理用例。
+	MemberService *appmembership.Service
+	// InvitationService 提供邀请用例。
+	InvitationService *appinvitation.Service
+	// Access 执行租户访问校验。
+	Access *tenancy.AccessService
+}
+
 // NewTenancyServices 装配邀请、创建租户、成员管理与访问校验用例。
+//
+// 装配顺序体现依赖方向：邀请依赖角色分配，创建租户依赖邀请与角色，
+// 成员管理依赖角色分配与策略投影——因此这些依赖必须先于用例构造。
 func NewTenancyServices(
 	tenants ports.TenantRepository,
 	memberships ports.MembershipRepository,
 	invitations ports.InvitationRepository,
+	membershipRoles ports.MembershipRoleRepository,
+	policies ports.PolicyRepository,
+	assignments *approle.AssignmentService,
+	roleSvc *approle.Service,
 	tx ports.Transactor,
+	reloader ports.PolicyReloader,
 	cfg config.Config,
-) (*apptenant.CreateService, *appmembership.Service, *appinvitation.Service, *tenancy.AccessService) {
-	invitationSvc := appinvitation.NewService(invitations, memberships, tx, cfg.InvitationTTL)
-	creator := apptenant.NewCreateService(tenants, tx, invitationSvc)
-	members := appmembership.NewService(memberships)
+) TenancyServices {
+	invitationSvc := appinvitation.NewService(
+		invitations, memberships, tx, assignments, cfg.DefaultMemberRoleKey, cfg.InvitationTTL)
+	creator := apptenant.NewCreateService(tenants, policies, tx, invitationSvc, roleSvc, reloader)
+	members := appmembership.NewService(memberships, membershipRoles, policies, tx, reloader)
 	access := tenancy.NewAccessService(tenants, memberships)
-	return creator, members, invitationSvc, access
+
+	return TenancyServices{
+		TenantCreator:     creator,
+		MemberService:     members,
+		InvitationService: invitationSvc,
+		Access:            access,
+	}
 }
