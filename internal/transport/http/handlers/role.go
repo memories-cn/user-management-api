@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 
 	approle "github.com/example/iam-service/internal/application/role"
+	"github.com/example/iam-service/internal/domain/identity"
 	"github.com/example/iam-service/internal/domain/role"
 	"github.com/example/iam-service/internal/transport/http/middleware"
 	"github.com/example/iam-service/internal/transport/http/responses"
@@ -39,13 +40,14 @@ func (h *RoleHandler) ListRoles(c *gin.Context) {
 		return
 	}
 
-	roles, err := h.roles.ListRoles(c.Request.Context(), tenantID)
+	limit, offset := parsePaging(c)
+	result, err := h.roles.ListRoles(c.Request.Context(), tenantID, limit, offset)
 	if err != nil {
 		writeError(c, err)
 		return
 	}
 
-	responses.OK(c, toRoleResponses(roles))
+	responses.OKList(c, toRoleResponses(result.Roles), result.Limit, result.Offset, result.Total)
 }
 
 // GetRole 返回单个角色。
@@ -72,6 +74,12 @@ func (h *RoleHandler) CreateRole(c *gin.Context) {
 		return
 	}
 
+	principal, ok := identity.FromContext(c.Request.Context())
+	if !ok || !principal.Authenticated {
+		responses.Fail(c, http.StatusUnauthorized, responses.CodeUnauthenticated, "missing or invalid credentials")
+		return
+	}
+
 	var req struct {
 		Key         string `json:"key" binding:"required"`
 		Name        string `json:"name" binding:"required"`
@@ -82,7 +90,7 @@ func (h *RoleHandler) CreateRole(c *gin.Context) {
 		return
 	}
 
-	rl, err := h.roles.CreateRole(c.Request.Context(), tenantID, req.Key, req.Name, req.Description)
+	rl, err := h.roles.CreateRole(c.Request.Context(), tenantID, req.Key, req.Name, req.Description, actorID(principal))
 	if err != nil {
 		writeError(c, err)
 		return
@@ -98,6 +106,12 @@ func (h *RoleHandler) UpdateRole(c *gin.Context) {
 		return
 	}
 
+	principal, ok := identity.FromContext(c.Request.Context())
+	if !ok || !principal.Authenticated {
+		responses.Fail(c, http.StatusUnauthorized, responses.CodeUnauthenticated, "missing or invalid credentials")
+		return
+	}
+
 	var req struct {
 		Name        string `json:"name"`
 		Description string `json:"description"`
@@ -107,7 +121,7 @@ func (h *RoleHandler) UpdateRole(c *gin.Context) {
 		return
 	}
 
-	rl, err := h.roles.UpdateRole(c.Request.Context(), tenantID, roleID, req.Name, req.Description)
+	rl, err := h.roles.UpdateRole(c.Request.Context(), tenantID, roleID, req.Name, req.Description, actorID(principal))
 	if err != nil {
 		writeError(c, err)
 		return
@@ -123,7 +137,13 @@ func (h *RoleHandler) DeleteRole(c *gin.Context) {
 		return
 	}
 
-	if err := h.roles.DeleteRole(c.Request.Context(), tenantID, roleID); err != nil {
+	principal, ok := identity.FromContext(c.Request.Context())
+	if !ok || !principal.Authenticated {
+		responses.Fail(c, http.StatusUnauthorized, responses.CodeUnauthenticated, "missing or invalid credentials")
+		return
+	}
+
+	if err := h.roles.DeleteRole(c.Request.Context(), tenantID, roleID, actorID(principal)); err != nil {
 		writeError(c, err)
 		return
 	}
@@ -138,6 +158,12 @@ func (h *RoleHandler) SetRolePermissions(c *gin.Context) {
 		return
 	}
 
+	principal, ok := identity.FromContext(c.Request.Context())
+	if !ok || !principal.Authenticated {
+		responses.Fail(c, http.StatusUnauthorized, responses.CodeUnauthenticated, "missing or invalid credentials")
+		return
+	}
+
 	var req struct {
 		Permissions []string `json:"permissions" binding:"required"`
 	}
@@ -146,7 +172,7 @@ func (h *RoleHandler) SetRolePermissions(c *gin.Context) {
 		return
 	}
 
-	perms, err := h.roles.SetRolePermissions(c.Request.Context(), tenantID, roleID, req.Permissions)
+	perms, err := h.roles.SetRolePermissions(c.Request.Context(), tenantID, roleID, req.Permissions, actorID(principal))
 	if err != nil {
 		writeError(c, err)
 		return

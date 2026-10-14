@@ -230,12 +230,19 @@ func withEmptyRequestID(rec *httptest.ResponseRecorder) string {
 // findUserIDExcept 从成员列表中取一个用户 ID（可排除指定 ID）。
 func findUserIDExcept(rec *httptest.ResponseRecorder, except string) string {
 	var parsed struct {
-		Data []struct {
-			UserID string `json:"user_id"`
+		Data struct {
+			Items []struct {
+				UserID string `json:"user_id"`
+			} `json:"items"`
+			Pagination struct {
+				Limit  int   `json:"limit"`
+				Offset int   `json:"offset"`
+				Total  int64 `json:"total"`
+			} `json:"pagination"`
 		} `json:"data"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &parsed)
-	for _, m := range parsed.Data {
+	for _, m := range parsed.Data.Items {
 		if m.UserID != "" && m.UserID != except {
 			return m.UserID
 		}

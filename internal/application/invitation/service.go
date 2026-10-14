@@ -14,7 +14,9 @@ import (
 
 	"github.com/google/uuid"
 
+	appaudit "github.com/example/iam-service/internal/application/audit"
 	approle "github.com/example/iam-service/internal/application/role"
+	"github.com/example/iam-service/internal/domain/audit"
 	"github.com/example/iam-service/internal/domain/identity"
 	invitationdomain "github.com/example/iam-service/internal/domain/invitation"
 	membershipdomain "github.com/example/iam-service/internal/domain/membership"
@@ -33,6 +35,8 @@ var (
 	ErrInvitationEmailMismatch = errors.New("当前身份邮箱与邀请邮箱不一致")
 	// ErrInvalidInvitationToken 表示邀请令牌不匹配。
 	ErrInvalidInvitationToken = errors.New("邀请令牌无效")
+	// ErrInvalidInvitationStatus 表示查询条件中的邀请状态非法。
+	ErrInvalidInvitationStatus = errors.New("非法的邀请状态")
 )
 
 // Service 提供成员邀请相关用例。
@@ -44,6 +48,8 @@ type Service struct {
 	// defaultRoleKey 是非首个成员加入时绑定的角色标识。
 	defaultRoleKey string
 	ttl            time.Duration
+	// audits 为邀请动作落审计；未装配时跳过留痕。
+	audits *appaudit.Service
 	// now 注入时钟，便于测试有效期相关分支。
 	now func() time.Time
 }
@@ -58,6 +64,7 @@ func NewService(
 	roles *approle.AssignmentService,
 	defaultRoleKey string,
 	ttl time.Duration,
+	audits *appaudit.Service,
 ) *Service {
 	return &Service{
 		invitations:    invitations,
@@ -66,6 +73,7 @@ func NewService(
 		roles:          roles,
 		defaultRoleKey: defaultRoleKey,
 		ttl:            ttl,
+		audits:         audits,
 		now:            time.Now,
 	}
 }
@@ -114,10 +122,35 @@ func (s *Service) Invite(ctx context.Context, invitedBy, tenantID uuid.UUID, ema
 	if err != nil {
 		return nil, err
 	}
-	if err := s.invitations.Create(ctx, inv); err != nil {
+
+	// 邀请与审计留痕同事务：复用外层事务（如"创建租户"）或在本层开启。
+	err = s.tx.WithinTx(ctx, func(txCtx context.Context) error {
+		if err := s.invitations.Create(txCtx, inv); err != nil {
+			return err
+		}
+		return s.audit(txCtx, tenantID, invitedBy, audit.ActionMemberInvite, "invitation", inv.ID.String(),
+			audit.ResultSuccess, map[string]any{"reused": false})
+	})
+	if err != nil {
 		return nil, err
 	}
 	return &InviteResult{Invitation: inv, Token: token}, nil
+}
+
+// audit 写入审计留痕；未装配审计服务时跳过。
+func (s *Service) audit(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	actorID uuid.UUID,
+	action audit.Action,
+	resourceType, resourceID string,
+	result audit.Result,
+	metadata map[string]any,
+) error {
+	if s.audits == nil {
+		return nil
+	}
+	return s.audits.RecordAction(ctx, &tenantID, actorID, action, resourceType, resourceID, result, metadata)
 }
 
 // Accept 接受邀请并绑定当前已认证身份。
@@ -255,9 +288,54 @@ func (s *Service) Cancel(ctx context.Context, tenantID, invitationID uuid.UUID) 
 	return s.invitations.Update(ctx, inv)
 }
 
-// ListByTenant 返回租户的邀请列表。
-func (s *Service) ListByTenant(ctx context.Context, tenantID uuid.UUID) ([]*invitationdomain.Invitation, error) {
-	return s.invitations.ListByTenant(ctx, tenantID.String())
+// ListResult 是邀请列表的分页结果。
+type ListResult struct {
+	// Invitations 是当页邀请。
+	Invitations []*invitationdomain.Invitation
+	// Total 是满足过滤条件的邀请总数。
+	Total int64
+	// Limit 与 Offset 是实际生效的分页参数。
+	Limit  int
+	Offset int
+}
+
+// ListByTenant 分页返回租户的邀请列表；status 为空串表示不过滤。
+func (s *Service) ListByTenant(ctx context.Context, tenantID uuid.UUID, status string, limit, offset int) (*ListResult, error) {
+	limit, offset = normalizePaging(limit, offset)
+
+	if status != "" && !isValidStatus(status) {
+		return nil, fmt.Errorf("%w：%s", ErrInvalidInvitationStatus, status)
+	}
+
+	list, err := s.invitations.ListByTenant(ctx, tenantID.String(), status, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	total, err := s.invitations.CountByTenant(ctx, tenantID.String(), status)
+	if err != nil {
+		return nil, err
+	}
+	return &ListResult{Invitations: list, Total: total, Limit: limit, Offset: offset}, nil
+}
+
+// 分页默认值与上限，与管理类列表接口保持一致。
+const (
+	DefaultLimit = 50
+	MaxLimit     = 100
+)
+
+// normalizePaging 约束分页参数。
+func normalizePaging(limit, offset int) (int, int) {
+	switch {
+	case limit <= 0:
+		limit = DefaultLimit
+	case limit > MaxLimit:
+		limit = MaxLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset
 }
 
 // ListPendingForEmail 返回指定邮箱的待接受邀请。
@@ -269,14 +347,24 @@ func (s *Service) ListPendingForEmail(ctx context.Context, email string) ([]*inv
 
 // findAccepted 查找该邮箱是否已有被接受的邀请。
 func (s *Service) findAccepted(ctx context.Context, tenantID uuid.UUID, email string) (*invitationdomain.Invitation, error) {
-	list, err := s.invitations.ListByTenant(ctx, tenantID.String())
+	list, err := s.invitations.ListByTenant(ctx, tenantID.String(), string(invitationdomain.StatusAccepted), MaxLimit, 0)
 	if err != nil {
 		return nil, err
 	}
 	for _, inv := range list {
-		if inv.Email == email && inv.Status == invitationdomain.StatusAccepted {
+		if inv.Email == email {
 			return inv, nil
 		}
 	}
 	return nil, nil
+}
+
+// isValidStatus 报告邀请状态是否合法，用于列表过滤条件校验。
+func isValidStatus(status string) bool {
+	switch invitationdomain.Status(status) {
+	case invitationdomain.StatusPending, invitationdomain.StatusAccepted,
+		invitationdomain.StatusCancelled, invitationdomain.StatusExpired:
+		return true
+	}
+	return false
 }

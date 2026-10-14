@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/example/iam-service/internal/domain/audit"
 	"github.com/example/iam-service/internal/domain/permission"
 	"github.com/example/iam-service/internal/domain/role"
 	"github.com/example/iam-service/internal/ports"
@@ -26,6 +27,8 @@ type Fixture struct {
 	MembershipRoles *MembershipRoleRepository
 	// Policies 是策略投影替身。
 	Policies *PolicyRepository
+	// Audits 是审计仓储替身。
+	Audits *AuditRepository
 	// Tx 是事务替身。
 	Tx *Transactor
 	// Reloader 记录策略刷新调用。
@@ -49,6 +52,7 @@ func NewFixture(permissionCodes ...string) *Fixture {
 		Roles:           roles,
 		MembershipRoles: membershipRoles,
 		Policies:        NewPolicyRepository(),
+		Audits:          NewAuditRepository(),
 		Tx:              &Transactor{},
 		Reloader:        &Reloader{},
 	}
@@ -166,7 +170,7 @@ func (r *RoleRepository) FindByKey(_ context.Context, tenantID, key string) (*ro
 }
 
 // ListByTenant 返回租户角色。
-func (r *RoleRepository) ListByTenant(_ context.Context, tenantID string) ([]*role.Role, error) {
+func (r *RoleRepository) ListByTenant(_ context.Context, tenantID string, _ int, _ int) ([]*role.Role, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	result := make([]*role.Role, 0)
@@ -237,6 +241,20 @@ func (r *RoleRepository) ListPermissions(ctx context.Context, tenantID, roleID s
 		}
 	}
 	return result, nil
+}
+
+// CountByTenant 统计租户角色数。
+func (r *RoleRepository) CountByTenant(_ context.Context, tenantID string) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var count int64
+	for _, rl := range r.items {
+		if rl.TenantID.String() == tenantID {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // CountAssignments 统计仍在使用该角色的成员数。
@@ -478,6 +496,92 @@ func (r *PolicyRepository) RoleRules(roleID string) []ports.PolicyPermission {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]ports.PolicyPermission{}, r.roleRules[roleID]...)
+}
+
+// AuditRepository 是审计仓储的内存替身。
+//
+// 断言审计内容时直接读取 Items / Entries；
+// 需要制造失败时用 SetCreateError 验证"审计写失败则操作回滚"。
+type AuditRepository struct {
+	mu sync.Mutex
+	// Entries 是已写入的审计记录，按写入顺序排列。
+	Entries []*audit.Entry
+	// createErr 非空时模拟写入失败。
+	createErr error
+}
+
+// NewAuditRepository 构造审计仓储替身。
+func NewAuditRepository() *AuditRepository {
+	return &AuditRepository{}
+}
+
+// SetCreateError 注入审计写入失败。
+func (r *AuditRepository) SetCreateError(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.createErr = err
+}
+
+// Create 追加一条审计记录。
+func (r *AuditRepository) Create(_ context.Context, e *audit.Entry) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.createErr != nil {
+		return r.createErr
+	}
+	r.Entries = append(r.Entries, e)
+	return nil
+}
+
+// ListByTenant 返回指定租户的审计记录，忽略过滤条件。
+func (r *AuditRepository) ListByTenant(_ context.Context, tenantID string, _ ports.AuditFilter) ([]*audit.Entry, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	result := make([]*audit.Entry, 0, len(r.Entries))
+	for _, e := range r.Entries {
+		if e.TenantID != nil && e.TenantID.String() == tenantID {
+			result = append(result, e)
+		}
+	}
+	return result, nil
+}
+
+// CountByTenant 返回指定租户的审计记录数。
+func (r *AuditRepository) CountByTenant(_ context.Context, tenantID string, _ ports.AuditFilter) (int64, error) {
+	entries, _ := r.ListByTenant(context.Background(), tenantID, ports.AuditFilter{})
+	return int64(len(entries)), nil
+}
+
+// Count 返回全部审计记录数。
+func (r *AuditRepository) Count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.Entries)
+}
+
+// Actions 返回已记录的操作类型，便于断言留痕覆盖面。
+func (r *AuditRepository) Actions() []audit.Action {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	actions := make([]audit.Action, 0, len(r.Entries))
+	for _, e := range r.Entries {
+		actions = append(actions, e.Action)
+	}
+	return actions
+}
+
+// HasAction 报告是否记录过指定类型的操作。
+func (r *AuditRepository) HasAction(action audit.Action) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range r.Entries {
+		if e.Action == action {
+			return true
+		}
+	}
+	return false
 }
 
 // Transactor 直接执行回调的事务替身。

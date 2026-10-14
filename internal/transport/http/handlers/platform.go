@@ -4,9 +4,11 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	apptenant "github.com/example/iam-service/internal/application/tenant"
 	"github.com/example/iam-service/internal/domain/identity"
+	tenantdomain "github.com/example/iam-service/internal/domain/tenant"
 	"github.com/example/iam-service/internal/transport/http/responses"
 )
 
@@ -44,11 +46,12 @@ type createTenantResponse struct {
 // PlatformHandler 提供平台管理接口。
 type PlatformHandler struct {
 	creator *apptenant.CreateService
+	status  *apptenant.StatusService
 }
 
 // NewPlatformHandler 构造平台管理处理器。
-func NewPlatformHandler(creator *apptenant.CreateService) *PlatformHandler {
-	return &PlatformHandler{creator: creator}
+func NewPlatformHandler(creator *apptenant.CreateService, status *apptenant.StatusService) *PlatformHandler {
+	return &PlatformHandler{creator: creator, status: status}
 }
 
 // CreateTenant 创建租户并为 owner 邮箱创建邀请。
@@ -57,7 +60,7 @@ func NewPlatformHandler(creator *apptenant.CreateService) *PlatformHandler {
 func (h *PlatformHandler) CreateTenant(c *gin.Context) {
 	principal, ok := identity.FromContext(c.Request.Context())
 	if !ok {
-		responses.Fail(c, http.StatusUnauthorized, "UNAUTHENTICATED", "missing or invalid credentials")
+		responses.Fail(c, http.StatusUnauthorized, responses.CodeUnauthenticated, "missing or invalid credentials")
 		return
 	}
 
@@ -87,6 +90,50 @@ func (h *PlatformHandler) CreateTenant(c *gin.Context) {
 			ExpiresAt: result.Invitation.ExpiresAt.Format(dateLayout),
 		},
 		Token: result.Token,
+	})
+}
+
+// setTenantStatusRequest 是变更租户状态的请求体。
+type setTenantStatusRequest struct {
+	Status string `json:"status" binding:"required"`
+}
+
+// SetTenantStatus 停用或恢复租户。
+//
+// 只接受 active 与 suspended：**不提供删除**——deleted 涉及数据清理与备份策略，
+// 尚未定义，宁可留空也不实现无法撤销的操作。
+// 停用后成员访问由租户守卫拒绝（403 TENANT_SUSPENDED），本处理器无需额外处理。
+func (h *PlatformHandler) SetTenantStatus(c *gin.Context) {
+	principal, ok := identity.FromContext(c.Request.Context())
+	if !ok {
+		responses.Fail(c, http.StatusUnauthorized, responses.CodeUnauthenticated, "missing or invalid credentials")
+		return
+	}
+
+	tenantID, err := uuid.Parse(c.Param("tenantID"))
+	if err != nil {
+		responses.Fail(c, http.StatusNotFound, CodeTenantNotFound, "tenant not found")
+		return
+	}
+
+	var req setTenantStatusRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		responses.Fail(c, http.StatusBadRequest, CodeInvalidArgument, "invalid request body")
+		return
+	}
+
+	tn, err := h.status.SetStatus(c.Request.Context(), actorID(principal), tenantID,
+		tenantdomain.Status(req.Status))
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+
+	responses.OK(c, tenantResponse{
+		ID:     tn.ID.String(),
+		Name:   tn.Name,
+		Slug:   tn.Slug,
+		Status: string(tn.Status),
 	})
 }
 

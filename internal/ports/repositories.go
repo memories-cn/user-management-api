@@ -47,8 +47,11 @@ type MembershipRepository interface {
 	Create(ctx context.Context, m *membership.Membership) error
 	// FindByTenantAndUser 查询指定租户下的指定用户成员关系，未命中返回 (nil, nil)。
 	FindByTenantAndUser(ctx context.Context, tenantID, userID string) (*membership.Membership, error)
-	// ListByTenant 分页返回租户成员，必须带 tenant_id 条件。
-	ListByTenant(ctx context.Context, tenantID string, limit, offset int) ([]*membership.Membership, error)
+	// ListByTenant 分页返回租户成员，必须带 tenant_id 条件；
+	// status 为空串表示不过滤。
+	ListByTenant(ctx context.Context, tenantID, status string, limit, offset int) ([]*membership.Membership, error)
+	// CountByTenant 统计满足状态过滤的成员数，用于分页信封的 total。
+	CountByTenant(ctx context.Context, tenantID, status string) (int64, error)
 	// CountActiveByTenant 统计租户内的 active 成员数。
 	CountActiveByTenant(ctx context.Context, tenantID string) (int64, error)
 	// Update 更新成员关系。
@@ -63,8 +66,10 @@ type InvitationRepository interface {
 	FindByID(ctx context.Context, id string) (*invitation.Invitation, error)
 	// FindPendingByTenantAndEmail 查询租户下指定邮箱的待接受邀请，未命中返回 (nil, nil)。
 	FindPendingByTenantAndEmail(ctx context.Context, tenantID, email string) (*invitation.Invitation, error)
-	// ListByTenant 返回租户的邀请列表。
-	ListByTenant(ctx context.Context, tenantID string) ([]*invitation.Invitation, error)
+	// ListByTenant 分页返回租户的邀请列表；status 为空串表示不过滤。
+	ListByTenant(ctx context.Context, tenantID, status string, limit, offset int) ([]*invitation.Invitation, error)
+	// CountByTenant 统计满足状态过滤的邀请数，用于分页信封的 total。
+	CountByTenant(ctx context.Context, tenantID, status string) (int64, error)
 	// ListPendingByEmail 返回指定邮箱的待接受邀请，用于"给我的邀请"。
 	ListPendingByEmail(ctx context.Context, email string) ([]*invitation.Invitation, error)
 	// Update 更新邀请。
@@ -94,8 +99,10 @@ type RoleRepository interface {
 	FindByID(ctx context.Context, tenantID, roleID string) (*role.Role, error)
 	// FindByKey 查询指定租户下指定标识的角色，未命中返回 (nil, nil)。
 	FindByKey(ctx context.Context, tenantID, key string) (*role.Role, error)
-	// ListByTenant 返回租户的全部角色。
-	ListByTenant(ctx context.Context, tenantID string) ([]*role.Role, error)
+	// ListByTenant 分页返回租户的角色，必须带 tenant_id 条件。
+	ListByTenant(ctx context.Context, tenantID string, limit, offset int) ([]*role.Role, error)
+	// CountByTenant 统计租户角色数，用于分页信封的 total。
+	CountByTenant(ctx context.Context, tenantID string) (int64, error)
 	// Update 更新角色。
 	Update(ctx context.Context, r *role.Role) error
 	// Delete 删除角色；数据库级联会清除 role_permissions 与 membership_roles。

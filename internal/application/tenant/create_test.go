@@ -120,7 +120,7 @@ func (f *fakeInvitations) FindPendingByTenantAndEmail(_ context.Context, tenantI
 	return nil, nil
 }
 
-func (f *fakeInvitations) ListByTenant(_ context.Context, tenantID string) ([]*invitationdomain.Invitation, error) {
+func (f *fakeInvitations) ListByTenant(_ context.Context, tenantID, _ string, _ int, _ int) ([]*invitationdomain.Invitation, error) {
 	var out []*invitationdomain.Invitation
 	for _, inv := range f.items {
 		if inv.TenantID.String() == tenantID {
@@ -153,7 +153,7 @@ func (f *fakeMemberships) FindByTenantAndUser(context.Context, string, string) (
 	return nil, nil
 }
 
-func (f *fakeMemberships) ListByTenant(context.Context, string, int, int) ([]*membershipdomain.Membership, error) {
+func (f *fakeMemberships) ListByTenant(context.Context, string, string, int, int) ([]*membershipdomain.Membership, error) {
 	return nil, nil
 }
 
@@ -188,12 +188,12 @@ func newTestService() (*CreateService, *fakeTenants, *fakeInvitations, *fakeMemb
 		"permission:read", "permission:assign", "audit:read",
 	)
 	assignments := approle.NewAssignmentService(
-		memberships, fix.Roles, fix.MembershipRoles, fix.Policies, fix.Tx, fix.Reloader)
-	roleSvc := approle.NewService(fix.Roles, fix.Permissions, fix.Policies, fix.Tx, fix.Reloader)
+		memberships, fix.Roles, fix.MembershipRoles, fix.Policies, fix.Tx, fix.Reloader, nil)
+	roleSvc := approle.NewService(fix.Roles, fix.Permissions, fix.Policies, fix.Tx, fix.Reloader, nil)
 
 	invitationSvc := appinvitation.NewService(
-		invitations, memberships, rollbackTx{}, assignments, domainrole.KeyMember, 7*24*time.Hour)
-	svc := NewCreateService(tenants, fix.Policies, rollbackTx{}, invitationSvc, roleSvc, fix.Reloader)
+		invitations, memberships, rollbackTx{}, assignments, domainrole.KeyMember, 7*24*time.Hour, nil)
+	svc := NewCreateService(tenants, fix.Policies, rollbackTx{}, invitationSvc, roleSvc, fix.Reloader, nil)
 	return svc, tenants, invitations, memberships, fix
 }
 
@@ -257,11 +257,11 @@ func TestCreate_RollsBackWhenInvitationFails(t *testing.T) {
 	// 事务回滚：租户创建后邀请失败，租户不应留存。
 	tx := rollbackTx{rollback: func() { tenants.items = map[uuid.UUID]*tenantdomain.Tenant{} }}
 	assignments := approle.NewAssignmentService(
-		memberships, fix.Roles, fix.MembershipRoles, fix.Policies, fix.Tx, fix.Reloader)
+		memberships, fix.Roles, fix.MembershipRoles, fix.Policies, fix.Tx, fix.Reloader, nil)
 	invitationSvc := appinvitation.NewService(
-		invitations, memberships, tx, assignments, domainrole.KeyMember, 7*24*time.Hour)
-	roleSvc := approle.NewService(fix.Roles, fix.Permissions, fix.Policies, fix.Tx, fix.Reloader)
-	svc := NewCreateService(tenants, fix.Policies, tx, invitationSvc, roleSvc, fix.Reloader)
+		invitations, memberships, tx, assignments, domainrole.KeyMember, 7*24*time.Hour, nil)
+	roleSvc := approle.NewService(fix.Roles, fix.Permissions, fix.Policies, fix.Tx, fix.Reloader, nil)
+	svc := NewCreateService(tenants, fix.Policies, tx, invitationSvc, roleSvc, fix.Reloader, nil)
 
 	_, err := svc.Create(context.Background(), uuid.New(), "Acme", "acme", "owner@example.com")
 
@@ -278,14 +278,24 @@ func TestCreate_RollsBackWhenTenantCreateFails(t *testing.T) {
 	fix := rbactest.NewFixture()
 	tx := rollbackTx{}
 	assignments := approle.NewAssignmentService(
-		memberships, fix.Roles, fix.MembershipRoles, fix.Policies, fix.Tx, fix.Reloader)
+		memberships, fix.Roles, fix.MembershipRoles, fix.Policies, fix.Tx, fix.Reloader, nil)
 	invitationSvc := appinvitation.NewService(
-		invitations, memberships, tx, assignments, domainrole.KeyMember, 7*24*time.Hour)
-	roleSvc := approle.NewService(fix.Roles, fix.Permissions, fix.Policies, fix.Tx, fix.Reloader)
-	svc := NewCreateService(tenants, fix.Policies, tx, invitationSvc, roleSvc, fix.Reloader)
+		invitations, memberships, tx, assignments, domainrole.KeyMember, 7*24*time.Hour, nil)
+	roleSvc := approle.NewService(fix.Roles, fix.Permissions, fix.Policies, fix.Tx, fix.Reloader, nil)
+	svc := NewCreateService(tenants, fix.Policies, tx, invitationSvc, roleSvc, fix.Reloader, nil)
 
 	_, err := svc.Create(context.Background(), uuid.New(), "Acme", "acme", "owner@example.com")
 
 	require.Error(t, err)
 	assert.Empty(t, invitations.items, "租户创建失败时不得留下邀请")
+}
+
+// CountByTenant 统计替身中的邀请数。
+func (f *fakeInvitations) CountByTenant(_ context.Context, _, _ string) (int64, error) {
+	return int64(len(f.items)), nil
+}
+
+// CountByTenant 返回固定的成员数，测试不依赖该计数。
+func (f *fakeMemberships) CountByTenant(context.Context, string, string) (int64, error) {
+	return 0, nil
 }

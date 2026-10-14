@@ -65,13 +65,18 @@ type permissionList struct {
 	} `json:"data"`
 }
 
-// roleList 是角色列表响应体。
+// roleList 是角色列表响应体（分页信封）。
 type roleList struct {
-	Data []struct {
-		ID       string `json:"id"`
-		Key      string `json:"key"`
-		Name     string `json:"name"`
-		IsSystem bool   `json:"is_system"`
+	Data struct {
+		Items []struct {
+			ID       string `json:"id"`
+			Key      string `json:"key"`
+			Name     string `json:"name"`
+			IsSystem bool   `json:"is_system"`
+		} `json:"items"`
+		Pagination struct {
+			Total int64 `json:"total"`
+		} `json:"pagination"`
 	} `json:"data"`
 }
 
@@ -125,13 +130,14 @@ func TestRBAC_TenantCreationPresetsSystemRoles(t *testing.T) {
 
 	roles := f.getRoles(f.ownerToken)
 
-	require.Len(t, roles.Data, 4, "租户创建必须预置 owner/admin/member/viewer")
-	keys := make([]string, 0, len(roles.Data))
-	for _, rl := range roles.Data {
+	require.Len(t, roles.Data.Items, 4, "租户创建必须预置 owner/admin/member/viewer")
+	keys := make([]string, 0, len(roles.Data.Items))
+	for _, rl := range roles.Data.Items {
 		keys = append(keys, rl.Key)
 		assert.True(t, rl.IsSystem, "预置角色必须是系统角色")
 	}
 	assert.ElementsMatch(t, []string{"owner", "admin", "member", "viewer"}, keys)
+	assert.Equal(t, int64(4), roles.Data.Pagination.Total)
 }
 
 func TestRBAC_FirstMemberBecomesOwner(t *testing.T) {
@@ -264,7 +270,7 @@ func TestRBAC_CrossTenantRoleIDIsRejectedByDatabase(t *testing.T) {
 	// 取本租户的 owner 角色 ID。
 	roles := f.getRoles(f.ownerToken)
 	var ownerRoleID string
-	for _, rl := range roles.Data {
+	for _, rl := range roles.Data.Items {
 		if rl.Key == "owner" {
 			ownerRoleID = rl.ID
 		}
@@ -351,7 +357,7 @@ func TestRBAC_SystemRoleCannotBeDeleted(t *testing.T) {
 
 	roles := f.getRoles(f.ownerToken)
 	var ownerRoleID string
-	for _, rl := range roles.Data {
+	for _, rl := range roles.Data.Items {
 		if rl.Key == "owner" {
 			ownerRoleID = rl.ID
 		}
@@ -408,7 +414,7 @@ func TestRBAC_RoleInUseCannotBeDeleted(t *testing.T) {
 	// member 角色正被第二个成员使用。
 	roles := f.getRoles(f.ownerToken)
 	var memberRoleID string
-	for _, rl := range roles.Data {
+	for _, rl := range roles.Data.Items {
 		if rl.Key == "member" {
 			memberRoleID = rl.ID
 		}

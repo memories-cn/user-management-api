@@ -62,8 +62,11 @@ func (f *fakeMemberships) Create(context.Context, *membership.Membership) error 
 func (f *fakeMemberships) FindByTenantAndUser(context.Context, string, string) (*membership.Membership, error) {
 	return f.item, f.err
 }
-func (f *fakeMemberships) ListByTenant(context.Context, string, int, int) ([]*membership.Membership, error) {
+func (f *fakeMemberships) ListByTenant(context.Context, string, string, int, int) ([]*membership.Membership, error) {
 	return nil, nil
+}
+func (f *fakeMemberships) CountByTenant(context.Context, string, string) (int64, error) {
+	return 0, nil
 }
 func (f *fakeMemberships) CountActiveByTenant(context.Context, string) (int64, error) { return 0, nil }
 func (f *fakeMemberships) Update(context.Context, *membership.Membership) error       { return nil }

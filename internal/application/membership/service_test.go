@@ -31,7 +31,7 @@ func (f *fakeRepo) FindByTenantAndUser(_ context.Context, tenantID, userID strin
 	return f.items[tenantID+"|"+userID], nil
 }
 
-func (f *fakeRepo) ListByTenant(_ context.Context, tenantID string, limit, offset int) ([]*membershipdomain.Membership, error) {
+func (f *fakeRepo) ListByTenant(_ context.Context, tenantID, _ string, limit, offset int) ([]*membershipdomain.Membership, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -42,6 +42,16 @@ func (f *fakeRepo) ListByTenant(_ context.Context, tenantID string, limit, offse
 		}
 	}
 	return out, nil
+}
+
+func (f *fakeRepo) CountByTenant(_ context.Context, _, status string) (int64, error) {
+	var count int64
+	for _, m := range f.items {
+		if status == "" || string(m.Status) == status {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func (f *fakeRepo) CountActiveByTenant(_ context.Context, _ string) (int64, error) {
@@ -100,11 +110,11 @@ func TestUpdateStatus_SuspendAndActivate(t *testing.T) {
 	m := seed(t, repo, tenantID)
 	ctx := context.Background()
 
-	updated, err := svc.UpdateStatus(ctx, tenantID.String(), m.UserID.String(), membershipdomain.StatusSuspended)
+	updated, err := svc.UpdateStatus(ctx, tenantID.String(), m.UserID.String(), membershipdomain.StatusSuspended, uuid.New())
 	require.NoError(t, err)
 	assert.Equal(t, membershipdomain.StatusSuspended, updated.Status)
 
-	updated, err = svc.UpdateStatus(ctx, tenantID.String(), m.UserID.String(), membershipdomain.StatusActive)
+	updated, err = svc.UpdateStatus(ctx, tenantID.String(), m.UserID.String(), membershipdomain.StatusActive, uuid.New())
 	require.NoError(t, err)
 	assert.Equal(t, membershipdomain.StatusActive, updated.Status)
 }
@@ -115,7 +125,7 @@ func TestUpdateStatus_RejectsInvalidStatus(t *testing.T) {
 	tenantID := uuid.New()
 	m := seed(t, repo, tenantID)
 
-	_, err := svc.UpdateStatus(context.Background(), tenantID.String(), m.UserID.String(), membershipdomain.StatusRemoved)
+	_, err := svc.UpdateStatus(context.Background(), tenantID.String(), m.UserID.String(), membershipdomain.StatusRemoved, uuid.New())
 
 	require.ErrorIs(t, err, ErrInvalidStatus)
 }
@@ -128,7 +138,7 @@ func TestUpdateStatus_RejectsRemovedMember(t *testing.T) {
 	m.Remove()
 	require.NoError(t, repo.Update(context.Background(), m))
 
-	_, err := svc.UpdateStatus(context.Background(), tenantID.String(), m.UserID.String(), membershipdomain.StatusActive)
+	_, err := svc.UpdateStatus(context.Background(), tenantID.String(), m.UserID.String(), membershipdomain.StatusActive, uuid.New())
 
 	require.ErrorIs(t, err, ErrMembershipNotFound, "已移除成员须重新走邀请流程")
 }
@@ -140,7 +150,7 @@ func TestRemove_SoftDeletes(t *testing.T) {
 	first := seed(t, repo, tenantID)
 	seed(t, repo, tenantID)
 
-	require.NoError(t, svc.Remove(context.Background(), tenantID.String(), first.UserID.String()))
+	require.NoError(t, svc.Remove(context.Background(), tenantID.String(), first.UserID.String(), uuid.New()))
 
 	stored, err := repo.FindByTenantAndUser(context.Background(), tenantID.String(), first.UserID.String())
 	require.NoError(t, err)
@@ -155,7 +165,7 @@ func TestRemove_ProtectsLastMember(t *testing.T) {
 	tenantID := uuid.New()
 	only := seed(t, repo, tenantID)
 
-	err := svc.Remove(context.Background(), tenantID.String(), only.UserID.String())
+	err := svc.Remove(context.Background(), tenantID.String(), only.UserID.String(), uuid.New())
 
 	require.ErrorIs(t, err, ErrCannotRemoveLastMember)
 }
@@ -168,8 +178,8 @@ func TestRemove_IsIdempotentForRemoved(t *testing.T) {
 	seed(t, repo, tenantID)
 	ctx := context.Background()
 
-	require.NoError(t, svc.Remove(ctx, tenantID.String(), first.UserID.String()))
+	require.NoError(t, svc.Remove(ctx, tenantID.String(), first.UserID.String(), uuid.New()))
 
-	err := svc.Remove(ctx, tenantID.String(), first.UserID.String())
+	err := svc.Remove(ctx, tenantID.String(), first.UserID.String(), uuid.New())
 	require.ErrorIs(t, err, ErrMembershipNotFound, "重复移除返回不存在而不是静默成功")
 }

@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 
+	appaudit "github.com/example/iam-service/internal/application/audit"
+	"github.com/example/iam-service/internal/domain/audit"
 	"github.com/example/iam-service/internal/domain/role"
 	"github.com/example/iam-service/internal/ports"
 )
@@ -29,6 +31,7 @@ type AssignmentService struct {
 	policies    ports.PolicyRepository
 	tx          ports.Transactor
 	reloader    ports.PolicyReloader
+	audits      *appaudit.Service
 }
 
 // NewAssignmentService 构造成员角色分配用例。
@@ -39,6 +42,7 @@ func NewAssignmentService(
 	policies ports.PolicyRepository,
 	tx ports.Transactor,
 	reloader ports.PolicyReloader,
+	audits *appaudit.Service,
 ) *AssignmentService {
 	return &AssignmentService{
 		memberships: memberships,
@@ -47,6 +51,7 @@ func NewAssignmentService(
 		policies:    policies,
 		tx:          tx,
 		reloader:    reloader,
+		audits:      audits,
 	}
 }
 
@@ -99,8 +104,12 @@ func (s *AssignmentService) SetMemberRoles(ctx context.Context, tenantID, userID
 		if err := s.policies.ReplaceMemberRules(txCtx, tenantID, userID, roleIDs); err != nil {
 			return err
 		}
-		_, err := s.policies.BumpVersion(txCtx)
-		return err
+		if _, err := s.policies.BumpVersion(txCtx); err != nil {
+			return err
+		}
+		// 角色分配属高风险操作：必须与业务写入同事务留痕。
+		return s.audit(txCtx, membership.TenantID, actorID, audit.ActionRoleAssign, "member", userID,
+			audit.ResultSuccess, map[string]any{"role_count": len(roles)})
 	})
 	if err != nil {
 		return nil, err
@@ -109,6 +118,22 @@ func (s *AssignmentService) SetMemberRoles(ctx context.Context, tenantID, userID
 		return nil, err
 	}
 	return roles, nil
+}
+
+// audit 在业务事务内写入审计留痕，失败即回滚整个操作。
+func (s *AssignmentService) audit(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	actorID uuid.UUID,
+	action audit.Action,
+	resourceType, resourceID string,
+	result audit.Result,
+	metadata map[string]any,
+) error {
+	if s.audits == nil {
+		return nil
+	}
+	return s.audits.RecordAction(ctx, &tenantID, actorID, action, resourceType, resourceID, result, metadata)
 }
 
 // AssignDefault 在成员尚无角色时为其分配指定角色，已有角色则不做变更。

@@ -10,6 +10,8 @@ import (
 
 	"github.com/google/uuid"
 
+	appaudit "github.com/example/iam-service/internal/application/audit"
+	"github.com/example/iam-service/internal/domain/audit"
 	"github.com/example/iam-service/internal/domain/permission"
 	"github.com/example/iam-service/internal/domain/role"
 	"github.com/example/iam-service/internal/ports"
@@ -29,6 +31,12 @@ var (
 	ErrInvalidRoleKey = errors.New("角色标识非法")
 )
 
+// 分页默认值与上限，与其他管理类列表接口保持一致。
+const (
+	DefaultLimit = 50
+	MaxLimit     = 100
+)
+
 // Service 提供租户内角色与角色权限用例。
 type Service struct {
 	roles       ports.RoleRepository
@@ -36,6 +44,7 @@ type Service struct {
 	policies    ports.PolicyRepository
 	tx          ports.Transactor
 	reloader    ports.PolicyReloader
+	audits      *appaudit.Service
 }
 
 // NewService 构造角色用例服务。
@@ -45,6 +54,7 @@ func NewService(
 	policies ports.PolicyRepository,
 	tx ports.Transactor,
 	reloader ports.PolicyReloader,
+	audits *appaudit.Service,
 ) *Service {
 	return &Service{
 		roles:       roles,
@@ -52,12 +62,34 @@ func NewService(
 		policies:    policies,
 		tx:          tx,
 		reloader:    reloader,
+		audits:      audits,
 	}
 }
 
-// ListRoles 返回租户的全部角色。
-func (s *Service) ListRoles(ctx context.Context, tenantID string) ([]*role.Role, error) {
-	return s.roles.ListByTenant(ctx, tenantID)
+// RoleListResult 是角色列表的分页结果。
+type RoleListResult struct {
+	// Roles 是当页角色。
+	Roles []*role.Role
+	// Total 是租户角色总数。
+	Total int64
+	// Limit 与 Offset 是实际生效的分页参数。
+	Limit  int
+	Offset int
+}
+
+// ListRoles 分页返回租户角色。
+func (s *Service) ListRoles(ctx context.Context, tenantID string, limit, offset int) (*RoleListResult, error) {
+	limit, offset = normalizePaging(limit, offset)
+
+	roles, err := s.roles.ListByTenant(ctx, tenantID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	total, err := s.roles.CountByTenant(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	return &RoleListResult{Roles: roles, Total: total, Limit: limit, Offset: offset}, nil
 }
 
 // GetRole 返回指定租户下的角色，不存在或跨租户都返回 ErrRoleNotFound。
@@ -75,7 +107,7 @@ func (s *Service) GetRole(ctx context.Context, tenantID, roleID string) (*role.R
 // CreateRole 创建租户自定义角色。
 //
 // 自定义角色的 key 不允许命中系统预置角色集合，否则会绕过系统角色的不可变保护。
-func (s *Service) CreateRole(ctx context.Context, tenantID, key, name, description string) (*role.Role, error) {
+func (s *Service) CreateRole(ctx context.Context, tenantID, key, name, description string, actorID uuid.UUID) (*role.Role, error) {
 	tenantUUID, err := uuid.Parse(tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("租户标识非法：%w", err)
@@ -97,7 +129,14 @@ func (s *Service) CreateRole(ctx context.Context, tenantID, key, name, descripti
 		return nil, fmt.Errorf("%w：%s", ErrRoleKeyConflict, rl.Key)
 	}
 
-	if err := s.roles.Create(ctx, rl); err != nil {
+	err = s.tx.WithinTx(ctx, func(txCtx context.Context) error {
+		if err := s.roles.Create(txCtx, rl); err != nil {
+			return err
+		}
+		return s.audit(txCtx, tenantUUID, actorID, audit.ActionRoleCreate, "role", rl.ID.String(),
+			audit.ResultSuccess, map[string]any{"role_key": rl.Key})
+	})
+	if err != nil {
 		return nil, err
 	}
 	return rl, nil
@@ -106,7 +145,7 @@ func (s *Service) CreateRole(ctx context.Context, tenantID, key, name, descripti
 // UpdateRole 修改角色展示信息。
 //
 // 系统角色也允许改 name/description，但 key 不可变（由领域层保证）。
-func (s *Service) UpdateRole(ctx context.Context, tenantID, roleID, name, description string) (*role.Role, error) {
+func (s *Service) UpdateRole(ctx context.Context, tenantID, roleID, name, description string, actorID uuid.UUID) (*role.Role, error) {
 	rl, err := s.GetRole(ctx, tenantID, roleID)
 	if err != nil {
 		return nil, err
@@ -114,7 +153,20 @@ func (s *Service) UpdateRole(ctx context.Context, tenantID, roleID, name, descri
 
 	rl.Rename(name)
 	rl.SetDescription(description)
-	if err := s.roles.Update(ctx, rl); err != nil {
+
+	tenantUUID, err := uuid.Parse(tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("租户标识非法：%w", err)
+	}
+
+	err = s.tx.WithinTx(ctx, func(txCtx context.Context) error {
+		if err := s.roles.Update(txCtx, rl); err != nil {
+			return err
+		}
+		return s.audit(txCtx, tenantUUID, actorID, audit.ActionRoleUpdate, "role", rl.ID.String(),
+			audit.ResultSuccess, map[string]any{"role_key": rl.Key})
+	})
+	if err != nil {
 		return nil, err
 	}
 	return rl, nil
@@ -124,7 +176,7 @@ func (s *Service) UpdateRole(ctx context.Context, tenantID, roleID, name, descri
 //
 // 保护规则（docs/TDD.md 10.2）：系统角色不可删除；仍被成员使用的角色不可删除。
 // 业务关联、策略投影与版本号在同一事务内更新。
-func (s *Service) DeleteRole(ctx context.Context, tenantID, roleID string) error {
+func (s *Service) DeleteRole(ctx context.Context, tenantID, roleID string, actorID uuid.UUID) error {
 	rl, err := s.GetRole(ctx, tenantID, roleID)
 	if err != nil {
 		return err
@@ -141,6 +193,11 @@ func (s *Service) DeleteRole(ctx context.Context, tenantID, roleID string) error
 		return fmt.Errorf("%w：%s（%d 个成员仍在使用）", ErrRoleInUse, rl.Key, used)
 	}
 
+	tenantUUID, err := uuid.Parse(tenantID)
+	if err != nil {
+		return fmt.Errorf("租户标识非法：%w", err)
+	}
+
 	err = s.tx.WithinTx(ctx, func(txCtx context.Context) error {
 		if err := s.policies.DeleteRoleRules(txCtx, tenantID, roleID); err != nil {
 			return err
@@ -148,8 +205,11 @@ func (s *Service) DeleteRole(ctx context.Context, tenantID, roleID string) error
 		if err := s.roles.Delete(txCtx, tenantID, roleID); err != nil {
 			return err
 		}
-		_, err := s.policies.BumpVersion(txCtx)
-		return err
+		if _, err := s.policies.BumpVersion(txCtx); err != nil {
+			return err
+		}
+		return s.audit(txCtx, tenantUUID, actorID, audit.ActionRoleDelete, "role", rl.ID.String(),
+			audit.ResultSuccess, map[string]any{"role_key": rl.Key})
 	})
 	if err != nil {
 		return err
@@ -161,8 +221,9 @@ func (s *Service) DeleteRole(ctx context.Context, tenantID, roleID string) error
 //
 // 不允许部分应用：任一代码不在系统目录中，整次变更都会被拒绝（事务回滚），
 // 避免角色权限与请求体产生偏差。
-func (s *Service) SetRolePermissions(ctx context.Context, tenantID, roleID string, codes []string) ([]*permission.Permission, error) {
-	if _, err := s.GetRole(ctx, tenantID, roleID); err != nil {
+func (s *Service) SetRolePermissions(ctx context.Context, tenantID, roleID string, codes []string, actorID uuid.UUID) ([]*permission.Permission, error) {
+	rl, err := s.GetRole(ctx, tenantID, roleID)
+	if err != nil {
 		return nil, err
 	}
 
@@ -179,12 +240,20 @@ func (s *Service) SetRolePermissions(ctx context.Context, tenantID, roleID strin
 		return nil, ErrPermissionNotFound
 	}
 
+	tenantUUID, err := uuid.Parse(tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("租户标识非法：%w", err)
+	}
+
 	err = s.tx.WithinTx(ctx, func(txCtx context.Context) error {
 		if err := s.applyPermissions(txCtx, tenantID, roleID, perms); err != nil {
 			return err
 		}
-		_, err := s.policies.BumpVersion(txCtx)
-		return err
+		if _, err := s.policies.BumpVersion(txCtx); err != nil {
+			return err
+		}
+		return s.audit(txCtx, tenantUUID, actorID, audit.ActionRolePermissionUpdate, "role", rl.ID.String(),
+			audit.ResultSuccess, map[string]any{"role_key": rl.Key, "permission_count": len(perms)})
 	})
 	if err != nil {
 		return nil, err
@@ -193,6 +262,39 @@ func (s *Service) SetRolePermissions(ctx context.Context, tenantID, roleID strin
 		return nil, err
 	}
 	return perms, nil
+}
+
+// normalizePaging 约束分页参数，避免超大 limit 拖垮查询。
+func normalizePaging(limit, offset int) (int, int) {
+	switch {
+	case limit <= 0:
+		limit = DefaultLimit
+	case limit > MaxLimit:
+		limit = MaxLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset
+}
+
+// audit 在业务事务内写入审计留痕。
+//
+// 审计写入失败会让整个事务回滚（fail closed）：
+// "改了权限但没留痕"比"操作失败"更不可接受。
+func (s *Service) audit(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	actorID uuid.UUID,
+	action audit.Action,
+	resourceType, resourceID string,
+	result audit.Result,
+	metadata map[string]any,
+) error {
+	if s.audits == nil {
+		return nil
+	}
+	return s.audits.RecordAction(ctx, &tenantID, actorID, action, resourceType, resourceID, result, metadata)
 }
 
 // ListRolePermissions 返回角色当前的权限集合。

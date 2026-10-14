@@ -11,8 +11,10 @@ import (
 
 	"github.com/google/uuid"
 
+	appaudit "github.com/example/iam-service/internal/application/audit"
 	appinvitation "github.com/example/iam-service/internal/application/invitation"
 	approle "github.com/example/iam-service/internal/application/role"
+	auditdomain "github.com/example/iam-service/internal/domain/audit"
 	invitationdomain "github.com/example/iam-service/internal/domain/invitation"
 	tenantdomain "github.com/example/iam-service/internal/domain/tenant"
 	"github.com/example/iam-service/internal/ports"
@@ -44,6 +46,7 @@ type CreateService struct {
 	invitations *appinvitation.Service
 	roles       *approle.Service
 	reloader    ports.PolicyReloader
+	audits      *appaudit.Service
 }
 
 // NewCreateService 构造创建租户用例。
@@ -54,6 +57,7 @@ func NewCreateService(
 	invitations *appinvitation.Service,
 	roles *approle.Service,
 	reloader ports.PolicyReloader,
+	audits *appaudit.Service,
 ) *CreateService {
 	return &CreateService{
 		tenants:     tenants,
@@ -62,6 +66,7 @@ func NewCreateService(
 		invitations: invitations,
 		roles:       roles,
 		reloader:    reloader,
+		audits:      audits,
 	}
 }
 
@@ -104,6 +109,19 @@ func (s *CreateService) Create(ctx context.Context, actor uuid.UUID, name, slug,
 		}
 		if _, err := s.policies.BumpVersion(txCtx); err != nil {
 			return err
+		}
+
+		// 平台管理操作留痕：与租户、邀请、系统角色同事务，
+		// 失败即整体回滚——"建了租户但没留痕"不可接受。
+		if s.audits != nil {
+			if err := s.audits.RecordAction(txCtx, nil, actor, auditdomain.ActionTenantCreate,
+				"tenant", tn.ID.String(), auditdomain.ResultSuccess, map[string]any{
+					"tenant_slug": tn.Slug,
+					"owner_email": invited.Invitation.Email,
+					"reused":      invited.Reused,
+				}); err != nil {
+				return err
+			}
 		}
 
 		result = CreateResult{

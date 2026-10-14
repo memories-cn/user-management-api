@@ -212,13 +212,20 @@ func countMembers(rec *httptest.ResponseRecorder) int {
 // parseMemberIDs 解析成员列表中的用户 ID。
 func parseMemberIDs(rec *httptest.ResponseRecorder) []string {
 	var parsed struct {
-		Data []struct {
-			UserID string `json:"user_id"`
+		Data struct {
+			Items []struct {
+				UserID string `json:"user_id"`
+			} `json:"items"`
+			Pagination struct {
+				Limit  int   `json:"limit"`
+				Offset int   `json:"offset"`
+				Total  int64 `json:"total"`
+			} `json:"pagination"`
 		} `json:"data"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &parsed)
-	ids := make([]string, 0, len(parsed.Data))
-	for _, m := range parsed.Data {
+	ids := make([]string, 0, len(parsed.Data.Items))
+	for _, m := range parsed.Data.Items {
 		ids = append(ids, m.UserID)
 	}
 	return ids

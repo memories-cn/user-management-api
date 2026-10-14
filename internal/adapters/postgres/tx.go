@@ -25,7 +25,16 @@ func NewTxManager(db *gorm.DB) *TxManager {
 }
 
 // WithinTx 在事务中执行 fn：返回错误即回滚，返回 nil 即提交。
+//
+// 若上下文已存在事务，则**复用**它而不是再开一个：
+// GORM 的 db.Transaction 只在句柄本身已是事务时才使用保存点，
+// 而这里持有的是基础连接，再开一个就是独立的物理事务——
+// 那样内层会先提交，外层回滚就带不走它，原子性形同虚设。
+// 用例相互组合（如"创建租户"调用"邀请"）是常态，因此必须支持事务加入。
 func (m *TxManager) WithinTx(ctx context.Context, fn func(ctx context.Context) error) error {
+	if _, ok := ctx.Value(txKey{}).(*gorm.DB); ok {
+		return fn(ctx)
+	}
 	return m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		return fn(withTx(ctx, tx))
 	})

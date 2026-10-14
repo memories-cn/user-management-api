@@ -129,6 +129,6 @@ func newTestService(repo *fakeRepo) (*Service, *fakeRoles, *fakePolicies, *fakeR
 	roles := newFakeRoles()
 	policies := newFakePolicies()
 	reloader := &fakeReloader{}
-	svc := NewService(repo, roles, policies, fakeTx{}, reloader)
+	svc := NewService(repo, roles, policies, fakeTx{}, reloader, nil)
 	return svc, roles, policies, reloader
 }

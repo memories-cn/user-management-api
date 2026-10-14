@@ -60,7 +60,7 @@ func (f *fakeInvitations) FindPendingByTenantAndEmail(_ context.Context, tenantI
 	return nil, nil
 }
 
-func (f *fakeInvitations) ListByTenant(_ context.Context, tenantID string) ([]*invitationdomain.Invitation, error) {
+func (f *fakeInvitations) ListByTenant(_ context.Context, tenantID, _ string, _, _ int) ([]*invitationdomain.Invitation, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -116,7 +116,7 @@ func (f *fakeMemberships) FindByTenantAndUser(_ context.Context, tenantID, userI
 	return f.items[key(tenantID, userID)], nil
 }
 
-func (f *fakeMemberships) ListByTenant(_ context.Context, tenantID string, _, _ int) ([]*membershipdomain.Membership, error) {
+func (f *fakeMemberships) ListByTenant(_ context.Context, tenantID, _ string, _, _ int) ([]*membershipdomain.Membership, error) {
 	var out []*membershipdomain.Membership
 	for k, m := range f.items {
 		if len(k) > len(tenantID) && k[:len(tenantID)] == tenantID {
@@ -161,9 +161,9 @@ func newTestService() (*Service, *fakeInvitations, *fakeMemberships, *rbactest.F
 
 	fix := rbactest.NewFixture()
 	assignments := approle.NewAssignmentService(
-		memberships, fix.Roles, fix.MembershipRoles, fix.Policies, fix.Tx, fix.Reloader)
+		memberships, fix.Roles, fix.MembershipRoles, fix.Policies, fix.Tx, fix.Reloader, nil)
 
-	svc := NewService(invitations, memberships, &fakeTx{}, assignments, domainrole.KeyMember, testTTL)
+	svc := NewService(invitations, memberships, &fakeTx{}, assignments, domainrole.KeyMember, testTTL, nil)
 	return svc, invitations, memberships, fix
 }
 
@@ -417,3 +417,13 @@ func mustToken(t *testing.T, svc *Service, tenantID, actor uuid.UUID, email stri
 
 // 确保 errors 被使用。
 var _ = errors.New
+
+// CountByTenant 返回固定计数，测试不依赖该值。
+func (f *fakeMemberships) CountByTenant(context.Context, string, string) (int64, error) {
+	return 0, nil
+}
+
+// CountByTenant 返回固定计数，测试不依赖该值。
+func (f *fakeInvitations) CountByTenant(context.Context, string, string) (int64, error) {
+	return int64(len(f.items)), nil
+}

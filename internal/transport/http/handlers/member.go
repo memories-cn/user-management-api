@@ -42,13 +42,13 @@ func (h *MemberHandler) ListMembers(c *gin.Context) {
 	}
 
 	limit, offset := parsePaging(c)
-	members, err := h.members.List(c.Request.Context(), tenantID, limit, offset)
+	result, err := h.members.List(c.Request.Context(), tenantID, c.Query("status"), limit, offset)
 	if err != nil {
 		writeError(c, err)
 		return
 	}
 
-	responses.OK(c, toMemberResponses(members))
+	responses.OKList(c, toMemberResponses(result.Members), result.Limit, result.Offset, result.Total)
 }
 
 // GetMember 返回指定成员。
@@ -74,6 +74,12 @@ func (h *MemberHandler) UpdateMemberStatus(c *gin.Context) {
 		return
 	}
 
+	principal, ok := identity.FromContext(c.Request.Context())
+	if !ok || !principal.Authenticated {
+		responses.Fail(c, http.StatusUnauthorized, responses.CodeUnauthenticated, "missing or invalid credentials")
+		return
+	}
+
 	var req struct {
 		Status string `json:"status" binding:"required"`
 	}
@@ -82,7 +88,8 @@ func (h *MemberHandler) UpdateMemberStatus(c *gin.Context) {
 		return
 	}
 
-	m, err := h.members.UpdateStatus(c.Request.Context(), tenantID, userID, membershipdomain.Status(req.Status))
+	m, err := h.members.UpdateStatus(c.Request.Context(), tenantID, userID,
+		membershipdomain.Status(req.Status), actorID(principal))
 	if err != nil {
 		writeError(c, err)
 		return
@@ -98,7 +105,13 @@ func (h *MemberHandler) RemoveMember(c *gin.Context) {
 		return
 	}
 
-	if err := h.members.Remove(c.Request.Context(), tenantID, userID); err != nil {
+	principal, ok := identity.FromContext(c.Request.Context())
+	if !ok || !principal.Authenticated {
+		responses.Fail(c, http.StatusUnauthorized, responses.CodeUnauthenticated, "missing or invalid credentials")
+		return
+	}
+
+	if err := h.members.Remove(c.Request.Context(), tenantID, userID, actorID(principal)); err != nil {
 		writeError(c, err)
 		return
 	}
@@ -133,7 +146,7 @@ func (h *MemberHandler) SetMemberRoles(c *gin.Context) {
 
 	principal, ok := identity.FromContext(c.Request.Context())
 	if !ok || !principal.Authenticated {
-		responses.Fail(c, http.StatusUnauthorized, middleware.CodeUnauthenticated, "missing or invalid credentials")
+		responses.Fail(c, http.StatusUnauthorized, responses.CodeUnauthenticated, "missing or invalid credentials")
 		return
 	}
 

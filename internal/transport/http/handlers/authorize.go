@@ -8,7 +8,6 @@ import (
 
 	"github.com/example/iam-service/internal/application/authorization"
 	"github.com/example/iam-service/internal/domain/identity"
-	"github.com/example/iam-service/internal/transport/http/middleware"
 	"github.com/example/iam-service/internal/transport/http/responses"
 )
 
@@ -47,7 +46,7 @@ func NewAuthorizeHandler(svc *authorization.Service) *AuthorizeHandler {
 func (h *AuthorizeHandler) Authorize(c *gin.Context) {
 	principal, ok := identity.FromContext(c.Request.Context())
 	if !ok || !principal.Authenticated {
-		responses.Fail(c, http.StatusUnauthorized, middleware.CodeUnauthenticated, "missing or invalid credentials")
+		responses.Fail(c, http.StatusUnauthorized, responses.CodeUnauthenticated, "missing or invalid credentials")
 		return
 	}
 

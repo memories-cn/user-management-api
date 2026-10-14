@@ -27,7 +27,9 @@ func NewRouter(app *bootstrap.App) *gin.Engine {
 	r.GET("/health/ready", health.Ready)
 
 	v1 := r.Group("/api/v1")
-	v1.Use(middleware.AuthN(app.Verifier, app.UserSync))
+	// AuditContext 必须在 AuthN 之后：审计需要的 request_id 由 RequestID 中间件生成，
+	// 用例层据此把审计记录与请求日志关联起来。
+	v1.Use(middleware.AuthN(app.Verifier, app.UserSync), middleware.AuditContext())
 	registerPlatformRoutes(v1, app)
 	registerTenantRoutes(v1, app)
 	registerInvitationSelfRoutes(v1, app)
@@ -45,15 +47,18 @@ func registerPlatformRoutes(v1 *gin.RouterGroup, app *bootstrap.App) {
 	platform := v1.Group("/platform")
 	platform.Use(middleware.RequirePlatformAdmin(app.PlatformAdmin))
 
-	handler := handlers.NewPlatformHandler(app.TenantCreator)
+	handler := handlers.NewPlatformHandler(app.TenantCreator, app.TenantStatus)
 	platform.POST("/tenants", handler.CreateTenant)
+	// 停用与恢复都是高风险操作，必须留痕（审计由用例在同事务内写入）。
+	platform.PATCH("/tenants/:tenantID/status", handler.SetTenantStatus)
 }
 
-// registerCatalogRoutes 注册系统级只读目录路由。
+// registerCatalogRoutes 注册当前用户与系统级只读目录路由。
 func registerCatalogRoutes(v1 *gin.RouterGroup, app *bootstrap.App) {
 	permissions := handlers.NewPermissionHandler(app.RoleService)
 	authorize := handlers.NewAuthorizeHandler(app.Authorization)
 
+	v1.GET("/me", handlers.NewMeHandler().Me)
 	v1.GET("/permissions", permissions.ListPermissions)
 	// 统一授权判定：身份只来自已验证令牌，请求体只能声明要判断什么。
 	v1.POST("/authorize", authorize.Authorize)
@@ -69,6 +74,7 @@ func registerTenantRoutes(v1 *gin.RouterGroup, app *bootstrap.App) {
 	members := handlers.NewMemberHandler(app.MemberService, app.AssignmentService)
 	invitations := handlers.NewInvitationHandler(app.InvitationService)
 	roles := handlers.NewRoleHandler(app.RoleService)
+	audits := handlers.NewAuditHandler(app.AuditService)
 
 	v1.GET("/tenants", tenants.ListMyTenants)
 
@@ -96,6 +102,10 @@ func registerTenantRoutes(v1 *gin.RouterGroup, app *bootstrap.App) {
 		scoped.PATCH("/roles/:roleID", guard(app, "role", "update"), roles.UpdateRole)
 		scoped.DELETE("/roles/:roleID", guard(app, "role", "delete"), roles.DeleteRole)
 		scoped.PUT("/roles/:roleID/permissions", guard(app, "permission", "assign"), roles.SetRolePermissions)
+
+		// 审计日志受独立权限保护：审计覆盖整个租户的操作留痕，
+		// 不应因为"能管理成员"就自动获得读取能力（docs/TDD.md 10.4）。
+		scoped.GET("/audit-logs", guard(app, "audit", "read"), audits.ListAuditLogs)
 	}
 }
 

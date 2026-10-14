@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	appaudit "github.com/example/iam-service/internal/application/audit"
 	appinvitation "github.com/example/iam-service/internal/application/invitation"
 	appmembership "github.com/example/iam-service/internal/application/membership"
 	approle "github.com/example/iam-service/internal/application/role"
@@ -16,14 +17,29 @@ import (
 	roledomain "github.com/example/iam-service/internal/domain/role"
 	tenantdomain "github.com/example/iam-service/internal/domain/tenant"
 	"github.com/example/iam-service/internal/ports"
-	"github.com/example/iam-service/internal/transport/http/middleware"
 	"github.com/example/iam-service/internal/transport/http/responses"
 )
 
-// 业务错误码。
+// 通用错误码引用 responses 包中的唯一来源，保证与中间件层口径一致。
 const (
 	// CodeInvalidArgument 表示请求参数不合法。
-	CodeInvalidArgument = "INVALID_ARGUMENT"
+	CodeInvalidArgument = responses.CodeInvalidArgument
+	// CodeForbidden 表示身份有效但权限不足。
+	CodeForbidden = responses.CodeForbidden
+	// CodeInternal 表示未预期的服务端错误。
+	CodeInternal = responses.CodeInternal
+	// CodeNotFound 复用统一的未找到错误码。
+	CodeNotFound = responses.CodeNotFound
+)
+
+// 业务错误码（本包独有）。
+const (
+	// CodeTenantNotFound 表示平台路径下未找到租户。
+	CodeTenantNotFound = "TENANT_NOT_FOUND"
+	// CodeAuditActionInvalid 表示审计查询条件中的操作类型非法。
+	CodeAuditActionInvalid = "AUDIT_ACTION_INVALID"
+	// CodeAuditFilterInvalid 表示审计查询的过滤条件非法。
+	CodeAuditFilterInvalid = "AUDIT_FILTER_INVALID"
 	// CodeTenantSlugConflict 表示租户标识冲突。
 	CodeTenantSlugConflict = "TENANT_SLUG_CONFLICT"
 	// CodeMemberAlreadyExists 表示目标已是租户成员。
@@ -42,11 +58,7 @@ const (
 	CodeInvitationExpired = "INVITATION_EXPIRED"
 	// CodeInvitationNotPending 表示邀请不处于待接受状态。
 	CodeInvitationNotPending = "INVITATION_NOT_PENDING"
-	// CodeInternal 表示未预期的服务端错误。
-	CodeInternal = "INTERNAL"
 
-	// CodeForbidden 表示身份有效但权限不足。
-	CodeForbidden = "FORBIDDEN"
 	// CodeRoleNotFound 表示角色不存在或不属于当前租户。
 	CodeRoleNotFound = "ROLE_NOT_FOUND"
 	// CodeRoleKeyConflict 表示租户内已存在同名角色。
@@ -131,7 +143,19 @@ func writeError(c *gin.Context, err error) {
 		errors.Is(err, appmembership.ErrCannotRemoveLastOwner):
 		responses.Fail(c, http.StatusConflict, CodeCannotRemoveLastOwner, "cannot remove the last active owner")
 	case errors.Is(err, ports.ErrInvalidToken):
-		responses.Fail(c, http.StatusUnauthorized, middleware.CodeUnauthenticated, "missing or invalid credentials")
+		responses.Fail(c, http.StatusUnauthorized, responses.CodeUnauthenticated, "missing or invalid credentials")
+
+	// 平台租户状态管理
+	case errors.Is(err, apptenant.ErrTenantNotFound):
+		responses.Fail(c, http.StatusNotFound, CodeTenantNotFound, "tenant not found")
+	case errors.Is(err, apptenant.ErrInvalidStatus):
+		responses.Fail(c, http.StatusBadRequest, CodeInvalidStatus, err.Error())
+
+	// 审计查询
+	case errors.Is(err, appaudit.ErrInvalidAction):
+		responses.Fail(c, http.StatusBadRequest, CodeAuditActionInvalid, err.Error())
+	case errors.Is(err, appaudit.ErrInvalidTimeRange):
+		responses.Fail(c, http.StatusBadRequest, CodeAuditFilterInvalid, err.Error())
 
 	default:
 		slog.ErrorContext(c.Request.Context(), "unhandled error", "error", err)
@@ -139,6 +163,3 @@ func writeError(c *gin.Context, err error) {
 	}
 	c.Abort()
 }
-
-// CodeNotFound 复用中间件层的未找到错误码。
-const CodeNotFound = "NOT_FOUND"

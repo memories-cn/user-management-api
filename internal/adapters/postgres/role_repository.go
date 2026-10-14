@@ -95,11 +95,12 @@ func (r *RoleRepository) FindByKey(ctx context.Context, tenantID, key string) (*
 }
 
 // ListByTenant 返回租户的全部角色，系统角色排在前面便于管理后台展示。
-func (r *RoleRepository) ListByTenant(ctx context.Context, tenantID string) ([]*role.Role, error) {
+func (r *RoleRepository) ListByTenant(ctx context.Context, tenantID string, limit, offset int) ([]*role.Role, error) {
 	var rows []roleModel
 	err := dbFrom(ctx, r.db).WithContext(ctx).
 		Where("tenant_id = ?", tenantID).
 		Order("is_system DESC, key ASC").
+		Limit(limit).Offset(offset).
 		Find(&rows).Error
 	if err != nil {
 		return nil, fmt.Errorf("查询租户角色失败：%w", err)
@@ -110,6 +111,18 @@ func (r *RoleRepository) ListByTenant(ctx context.Context, tenantID string) ([]*
 		result = append(result, roleToDomain(row))
 	}
 	return result, nil
+}
+
+// CountByTenant 统计租户角色数，用于分页信封的 total。
+func (r *RoleRepository) CountByTenant(ctx context.Context, tenantID string) (int64, error) {
+	var count int64
+	err := dbFrom(ctx, r.db).WithContext(ctx).Model(&roleModel{}).
+		Where("tenant_id = ?", tenantID).
+		Count(&count).Error
+	if err != nil {
+		return 0, fmt.Errorf("统计租户角色数失败：%w", err)
+	}
+	return count, nil
 }
 
 // Update 更新角色。

@@ -66,11 +66,16 @@ func (r *MembershipRepository) FindByTenantAndUser(ctx context.Context, tenantID
 }
 
 // ListByTenant 分页返回租户成员，查询必须带 tenant_id 条件（租户隔离）。
-func (r *MembershipRepository) ListByTenant(ctx context.Context, tenantID string, limit, offset int) ([]*membership.Membership, error) {
+//
+// status 为空串表示不过滤；过滤条件下推到 SQL，不做内存过滤。
+func (r *MembershipRepository) ListByTenant(ctx context.Context, tenantID, status string, limit, offset int) ([]*membership.Membership, error) {
 	var rows []membershipModel
-	err := dbFrom(ctx, r.db).WithContext(ctx).
-		Where("tenant_id = ?", tenantID).
-		Order("created_at ASC").
+	query := dbFrom(ctx, r.db).WithContext(ctx).Where("tenant_id = ?", tenantID)
+	if status != "" {
+		query = query.Where("status = ?", status)
+	}
+
+	err := query.Order("created_at ASC").
 		Limit(limit).Offset(offset).
 		Find(&rows).Error
 	if err != nil {
@@ -82,6 +87,21 @@ func (r *MembershipRepository) ListByTenant(ctx context.Context, tenantID string
 		result = append(result, membershipToDomain(row))
 	}
 	return result, nil
+}
+
+// CountByTenant 统计满足状态过滤的成员数。
+func (r *MembershipRepository) CountByTenant(ctx context.Context, tenantID, status string) (int64, error) {
+	var count int64
+	query := dbFrom(ctx, r.db).WithContext(ctx).Model(&membershipModel{}).
+		Where("tenant_id = ?", tenantID)
+	if status != "" {
+		query = query.Where("status = ?", status)
+	}
+
+	if err := query.Count(&count).Error; err != nil {
+		return 0, fmt.Errorf("统计租户成员数失败：%w", err)
+	}
+	return count, nil
 }
 
 // CountActiveByTenant 统计租户内的 active 成员数。

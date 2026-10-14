@@ -1,0 +1,1091 @@
+openapi: 3.0.3
+info:
+  title: IAM Service API
+  version: "1.0.0"
+  description: |
+    基于 ZITADEL 的多租户用户管理与授权服务。
+
+    认证方式：所有 `/api/v1` 接口都需要 `Authorization: Bearer <access token>`，
+    令牌由 ZITADEL 签发，本服务仅作为资源服务器本地验签。
+
+    授权模型：租户级接口执行
+    `Authenticated AND UserActive AND TenantActive AND MembershipActive AND ResourceBelongsToTenant AND PermissionGranted`，
+    其中细粒度权限由 Casbin 以 `(subject, tenant, resource, action)` 四元组判定。
+
+    统一响应：成功 `{"data": ..., "request_id": "..."}`；
+    失败 `{"error": {"code": "...", "message": "..."}, "request_id": "..."}`。
+
+servers:
+  - url: /api/v1
+    description: API 根路径
+
+tags:
+  - name: health
+    description: 健康检查
+  - name: me
+    description: 当前用户
+  - name: platform
+    description: 平台管理（仅平台管理员）
+  - name: tenants
+    description: 租户
+  - name: members
+    description: 成员与角色分配
+  - name: invitations
+    description: 成员邀请
+  - name: roles
+    description: 角色与权限
+  - name: audit
+    description: 审计日志
+  - name: authz
+    description: 统一授权判定
+
+security:
+  - bearerAuth: []
+
+paths:
+  /health/live:
+    get:
+      tags: [health]
+      summary: 存活检查
+      security: []
+      servers: [{ url: / }]
+      responses:
+        "200":
+          description: 进程存活
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+
+  /health/ready:
+    get:
+      tags: [health]
+      summary: 就绪检查
+      description: 校验数据库连通性、迁移状态、策略加载与策略刷新状态；任一不可用返回 503。
+      security: []
+      servers: [{ url: / }]
+      responses:
+        "200":
+          description: 服务可处理请求
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+        "503":
+          $ref: "#/components/responses/DependencyUnavailable"
+
+  /me:
+    get:
+      tags: [me]
+      summary: 当前用户资料
+      servers: [{ url: / }]
+      responses:
+        "200":
+          description: 当前用户
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MeEnvelope" }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+
+  /permissions:
+    get:
+      tags: [roles]
+      summary: 查询系统权限目录
+      description: 权限集合由系统迁移维护，租户只能在既有集合内组合角色，没有新建权限的接口。
+      servers: [{ url: / }]
+      responses:
+        "200":
+          description: 权限目录
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PermissionListEnvelope" }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+
+  /authorize:
+    post:
+      tags: [authz]
+      summary: 统一授权判定
+      description: |
+        请求体**只能**声明要判断的租户、资源与操作；调用者身份一律来自已验证令牌。
+
+        业务性拒绝（非成员、无权限、租户停用）返回 200 且 `allowed=false`，
+        以避免通过状态码枚举租户是否存在；依赖不可用返回 503，
+        调用方必须失败关闭，不能把 503 当成"无权限"后自行放行。
+      servers: [{ url: / }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tenant_id, resource, action]
+              properties:
+                tenant_id: { type: string, format: uuid }
+                resource: { type: string, example: member }
+                action: { type: string, example: invite }
+      responses:
+        "200":
+          description: 判定结果
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthorizeEnvelope" }
+        "400":
+          $ref: "#/components/responses/InvalidArgument"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "503":
+          $ref: "#/components/responses/DependencyUnavailable"
+
+  /tenants:
+    get:
+      tags: [tenants]
+      summary: 查询当前用户所属的租户
+      servers: [{ url: / }]
+      responses:
+        "200":
+          description: 租户列表
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TenantListEnvelope" }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+
+  /tenants/{tenantID}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [tenants]
+      summary: 查询租户详情
+      description: 需要 `tenant:read`。非成员与租户不存在都返回 404（防枚举）。
+      servers: [{ url: / }]
+      responses:
+        "200":
+          description: 租户详情
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TenantEnvelope" }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [tenants]
+      summary: 修改租户名称
+      description: 需要 `tenant:update`。
+      servers: [{ url: / }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "200":
+          description: 更新后的租户
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TenantEnvelope" }
+        "400":
+          $ref: "#/components/responses/InvalidArgument"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /tenants/{tenantID}/members:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [members]
+      summary: 查询租户成员
+      description: 需要 `member:read`。支持 `limit`、`offset` 与 `status` 过滤。
+      servers: [{ url: / }]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, pending, suspended, removed]
+      responses:
+        "200":
+          description: 成员列表
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MemberListEnvelope" }
+        "400":
+          $ref: "#/components/responses/InvalidArgument"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /tenants/{tenantID}/members/{userID}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/UserID"
+    get:
+      tags: [members]
+      summary: 查询成员
+      description: 需要 `member:read`。
+      servers: [{ url: / }]
+      responses:
+        "200":
+          description: 成员详情
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MemberEnvelope" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [members]
+      summary: 变更成员状态
+      description: |
+        需要 `member:update`。仅允许 `active` 与 `suspended`；
+        停用立即生效，因为租户守卫每次请求直查数据库，不依赖策略刷新窗口。
+      servers: [{ url: / }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [active, suspended] }
+      responses:
+        "200":
+          description: 更新后的成员
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MemberEnvelope" }
+        "400":
+          $ref: "#/components/responses/InvalidArgument"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [members]
+      summary: 移除成员
+      description: |
+        需要 `member:remove`。软删除（`status=removed`），保留唯一约束；
+        移除会立即清除其角色与授权规则并留痕。不能移除最后一个有效成员或最后一个有效 Owner。
+      servers: [{ url: / }]
+      responses:
+        "200":
+          description: 已移除
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StatusEnvelope" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /tenants/{tenantID}/members/{userID}/roles:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/UserID"
+    get:
+      tags: [members]
+      summary: 查询成员角色
+      description: 需要 `role:read`。
+      servers: [{ url: / }]
+      responses:
+        "200":
+          description: 角色列表
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RoleListEnvelope" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [members]
+      summary: 设置成员角色
+      description: |
+        需要 `role:assign`。整体替换；传空数组表示清空角色（一次合法的撤权操作）。
+        角色必须属于同一租户；移除最后一个有效 Owner 会被拒绝。
+      servers: [{ url: / }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [roles]
+              properties:
+                roles:
+                  type: array
+                  items: { type: string }
+                  example: [admin, viewer]
+      responses:
+        "200":
+          description: 设置后的角色
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RoleListEnvelope" }
+        "400":
+          $ref: "#/components/responses/InvalidArgument"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /tenants/{tenantID}/invitations:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    post:
+      tags: [invitations]
+      summary: 邀请成员
+      description: |
+        需要 `member:invite`。遵循"先认证、后绑定"：只绑定已认证且邮箱已验证的身份，
+        不会因为一个邮箱字符串创建可登录用户。有效期 7 天，重复邀请幂等。
+      servers: [{ url: / }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        "200":
+          description: 邀请详情（含明文令牌，仅创建时返回）
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InvitationCreatedEnvelope" }
+        "400":
+          $ref: "#/components/responses/InvalidArgument"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    get:
+      tags: [invitations]
+      summary: 查询租户邀请
+      description: 需要 `member:read`。支持 `limit`、`offset` 与 `status` 过滤。
+      servers: [{ url: / }]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, accepted, cancelled, expired]
+      responses:
+        "200":
+          description: 邀请列表
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InvitationListEnvelope" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /tenants/{tenantID}/invitations/{invitationID}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - name: invitationID
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [invitations]
+      summary: 撤销邀请
+      description: 需要 `member:invite`。仅待接受状态可撤销，且必须属于指定租户。
+      servers: [{ url: / }]
+      responses:
+        "200":
+          description: 已撤销
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StatusEnvelope" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /tenants/{tenantID}/roles:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [roles]
+      summary: 查询租户角色
+      description: 需要 `role:read`。支持 `limit` 与 `offset`。
+      servers: [{ url: / }]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: 角色列表
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RoleListEnvelope" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      tags: [roles]
+      summary: 创建自定义角色
+      description: 需要 `role:create`。标识不允许命中系统预置角色集合。
+      servers: [{ url: / }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, name]
+              properties:
+                key: { type: string, example: billing_manager }
+                name: { type: string, example: 账单管理员 }
+                description: { type: string }
+      responses:
+        "200":
+          description: 新建角色
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RoleEnvelope" }
+        "400":
+          $ref: "#/components/responses/InvalidArgument"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /tenants/{tenantID}/roles/{roleID}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - name: roleID
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [roles]
+      summary: 查询角色
+      description: 需要 `role:read`。
+      servers: [{ url: / }]
+      responses:
+        "200":
+          description: 角色详情
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RoleEnvelope" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [roles]
+      summary: 修改角色展示信息
+      description: |
+        需要 `role:update`。系统角色的 `key` 不可变，但可调整展示信息与权限集合。
+      servers: [{ url: / }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                description: { type: string }
+      responses:
+        "200":
+          description: 更新后的角色
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RoleEnvelope" }
+        "400":
+          $ref: "#/components/responses/InvalidArgument"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      tags: [roles]
+      summary: 删除自定义角色
+      description: 需要 `role:delete`。系统角色不可删除；仍被成员使用的角色也不可删除。
+      servers: [{ url: / }]
+      responses:
+        "200":
+          description: 已删除
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StatusEnvelope" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /tenants/{tenantID}/roles/{roleID}/permissions:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - name: roleID
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      tags: [roles]
+      summary: 设置角色权限
+      description: |
+        需要 `permission:assign`。整体替换，不允许部分应用：
+        任一代码不在系统权限目录中，整次变更都会被拒绝并回滚。
+      servers: [{ url: / }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [permissions]
+              properties:
+                permissions:
+                  type: array
+                  items: { type: string }
+                  example: ["member:read", "member:invite"]
+      responses:
+        "200":
+          description: 设置后的权限
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PermissionListEnvelope" }
+        "400":
+          $ref: "#/components/responses/InvalidArgument"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /tenants/{tenantID}/audit-logs:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [audit]
+      summary: 查询审计日志
+      description: |
+        需要 `audit:read`。审计覆盖整个租户的操作留痕，
+        不应因为"能管理成员"就自动获得读取能力。
+
+        查询强制限定在当前租户，不接受任何跨租户参数。
+        非法 `action` 与非法时间区间返回 400——静默忽略会让管理员误以为"没有这类操作"。
+      servers: [{ url: / }]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - name: actor_user_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: action
+          in: query
+          description: 操作类型，例如 `member.remove`、`role.assign`、`tenant.suspend`
+          schema:
+            type: string
+            enum:
+              - member.invite
+              - member.remove
+              - member.status_change
+              - role.assign
+              - role.create
+              - role.update
+              - role.delete
+              - role.permission_update
+              - tenant.create
+              - tenant.suspend
+              - tenant.activate
+        - name: resource_type
+          in: query
+          schema: { type: string, enum: [member, role, invitation, tenant] }
+        - name: since
+          in: query
+          description: RFC3339 起始时间（含）
+          schema: { type: string, format: date-time }
+        - name: until
+          in: query
+          description: RFC3339 结束时间（含）
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: 审计记录
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditListEnvelope" }
+        "400":
+          $ref: "#/components/responses/InvalidArgument"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /platform/tenants:
+    post:
+      tags: [platform]
+      summary: 创建租户
+      description: |
+        **仅平台管理员可创建**：判定依据是已验证令牌中的 ZITADEL 角色
+        （`PLATFORM_ADMIN_ROLE_KEY`），没有白名单或应急通道。
+        平台管理员创建租户后不会成为其成员，成员关系只能通过邀请建立。
+      servers: [{ url: / }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, slug, owner_email]
+              properties:
+                name: { type: string, example: Acme }
+                slug: { type: string, example: acme }
+                owner_email: { type: string, format: email }
+      responses:
+        "200":
+          description: 租户与 owner 邀请
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreateTenantEnvelope" }
+        "400":
+          $ref: "#/components/responses/InvalidArgument"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /platform/tenants/{tenantID}/status:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    patch:
+      tags: [platform]
+      summary: 停用或恢复租户
+      description: |
+        **仅平台管理员**。只接受 `active` 与 `suspended`：
+        不提供删除——`deleted` 涉及数据清理与备份策略，尚未定义，
+        宁可留空也不实现无法撤销的操作。
+
+        停用与恢复都是高风险操作，两者都会在同一事务内留痕。
+        停用后成员访问立即返回 `403 TENANT_SUSPENDED`。
+      servers: [{ url: / }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [active, suspended] }
+      responses:
+        "200":
+          description: 更新后的租户
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TenantEnvelope" }
+        "400":
+          $ref: "#/components/responses/InvalidArgument"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /invitations/pending:
+    get:
+      tags: [invitations]
+      summary: 查询给当前用户的待接受邀请
+      description: 按已验证邮箱过滤；邮箱未验证时返回空列表。
+      servers: [{ url: / }]
+      responses:
+        "200":
+          description: 邀请列表
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InvitationListEnvelope" }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+
+  /invitations/{invitationID}/accept:
+    parameters:
+      - name: invitationID
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [invitations]
+      summary: 接受邀请
+      description: |
+        绑定当前已认证且邮箱已验证的身份；邮箱不匹配或未验证一律拒绝。
+        首个接受邀请的成员自动成为 owner，其余按默认角色加入。重复接受幂等。
+      servers: [{ url: / }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        "200":
+          description: 建立的成员关系
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MemberEnvelope" }
+        "400":
+          $ref: "#/components/responses/InvalidArgument"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: ZITADEL 签发的访问令牌。本服务本地验签，不提供登录接口。
+
+  parameters:
+    TenantID:
+      name: tenantID
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    UserID:
+      name: userID
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Limit:
+      name: limit
+      in: query
+      description: 每页条数，默认 50，上限 100。
+      schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+    Offset:
+      name: offset
+      in: query
+      description: 偏移量，默认 0。
+      schema: { type: integer, minimum: 0, default: 0 }
+
+  responses:
+    InvalidArgument:
+      description: 请求参数不合法
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example: { error: { code: INVALID_ARGUMENT, message: invalid request body }, request_id: req-uuid }
+    Unauthenticated:
+      description: 缺少或无效的身份凭证
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example: { error: { code: UNAUTHENTICATED, message: missing or invalid credentials }, request_id: req-uuid }
+    Forbidden:
+      description: 身份有效但权限不足
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example: { error: { code: FORBIDDEN, message: permission denied }, request_id: req-uuid }
+    NotFound:
+      description: 资源不存在，或按防枚举策略隐藏了资源存在性
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example: { error: { code: NOT_FOUND, message: resource not found }, request_id: req-uuid }
+    Conflict:
+      description: 状态冲突或唯一约束冲突
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example: { error: { code: ROLE_IN_USE, message: role is still assigned to members }, request_id: req-uuid }
+    DependencyUnavailable:
+      description: 必要依赖暂时不可用。请求未被放行（fail closed）。
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example: { error: { code: DEPENDENCY_UNAVAILABLE, message: authorization service unavailable }, request_id: req-uuid }
+
+  schemas:
+    Pagination:
+      type: object
+      required: [limit, offset, total]
+      properties:
+        limit: { type: integer }
+        offset: { type: integer }
+        total: { type: integer, format: int64 }
+
+    ListEnvelope:
+      type: object
+      required: [items, pagination]
+      properties:
+        items: { type: array, items: {} }
+        pagination: { $ref: "#/components/schemas/Pagination" }
+
+    Envelope:
+      type: object
+      required: [data, request_id]
+      properties:
+        data: {}
+        request_id: { type: string }
+
+    ErrorEnvelope:
+      type: object
+      required: [error, request_id]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+        request_id: { type: string }
+
+    HealthResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                status: { type: string, example: ok }
+
+    Tenant:
+      type: object
+      required: [id, name, slug, status]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        status: { type: string, enum: [active, suspended, deleted] }
+
+    TenantEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/Tenant" }
+
+    TenantListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: array
+              items: { $ref: "#/components/schemas/Tenant" }
+
+    Member:
+      type: object
+      required: [user_id, tenant_id, status]
+      properties:
+        user_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        status: { type: string, enum: [active, pending, suspended, removed] }
+        joined_at: { type: string, format: date-time }
+
+    MemberEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/Member" }
+
+    MemberListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/ListEnvelope" }
+
+    Permission:
+      type: object
+      required: [code, resource, action]
+      properties:
+        code: { type: string, example: member:invite }
+        resource: { type: string, example: member }
+        action: { type: string, example: invite }
+        description: { type: string }
+
+    PermissionListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: array
+              items: { $ref: "#/components/schemas/Permission" }
+
+    Role:
+      type: object
+      required: [id, key, name, is_system]
+      properties:
+        id: { type: string, format: uuid }
+        key: { type: string, example: owner }
+        name: { type: string }
+        description: { type: string }
+        is_system: { type: boolean }
+
+    RoleEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/Role" }
+
+    RoleListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/ListEnvelope" }
+
+    Invitation:
+      type: object
+      required: [id, email, status, expires_at]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        status: { type: string, enum: [pending, accepted, cancelled, expired] }
+        expires_at: { type: string, format: date-time }
+
+    InvitationCreatedEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                invitation: { $ref: "#/components/schemas/Invitation" }
+                token:
+                  type: string
+                  description: 明文令牌，仅新建邀请时返回；生产环境应改为邮件投递。
+                reused: { type: boolean }
+
+    InvitationListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: array
+              items: { $ref: "#/components/schemas/Invitation" }
+
+    CreateTenantEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                tenant: { $ref: "#/components/schemas/Tenant" }
+                invitation: { $ref: "#/components/schemas/Invitation" }
+                token: { type: string }
+
+    AuditLog:
+      type: object
+      required: [id, actor_user_id, action, resource_type, result, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id:
+          type: string
+          format: uuid
+          description: 平台级且与租户无关的操作（如创建租户）为空。
+        actor_user_id: { type: string, format: uuid }
+        action: { type: string, example: member.remove }
+        resource_type: { type: string, example: member }
+        resource_id: { type: string }
+        result: { type: string, enum: [success, denied, error] }
+        request_id: { type: string }
+        ip_address:
+          type: string
+          description: 仅作辅助线索，不作为授权依据。生产环境需配置可信代理。
+        user_agent: { type: string }
+        metadata:
+          type: object
+          additionalProperties: true
+          description: 附加结构化信息，不含任何凭据类字段。
+        created_at: { type: string, format: date-time }
+
+    AuditListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/ListEnvelope" }
+
+    AuthorizeResult:
+      type: object
+      required: [allowed]
+      properties:
+        allowed: { type: boolean }
+        tenant_id: { type: string, format: uuid }
+        resource: { type: string }
+        action: { type: string }
+
+    AuthorizeEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/AuthorizeResult" }
+
+    Me:
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+        zitadel_user_id: { type: string }
+        display_name: { type: string }
+        avatar_url: { type: string }
+        status: { type: string, enum: [active, disabled] }
+
+    MeEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/Me" }
+
+    StatusEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                status: { type: string }

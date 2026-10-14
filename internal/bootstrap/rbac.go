@@ -9,6 +9,7 @@ import (
 
 	casbinadapter "github.com/example/iam-service/internal/adapters/casbin"
 	"github.com/example/iam-service/internal/adapters/postgres"
+	appaudit "github.com/example/iam-service/internal/application/audit"
 	"github.com/example/iam-service/internal/application/authorization"
 	approle "github.com/example/iam-service/internal/application/role"
 	"github.com/example/iam-service/internal/application/tenancy"
@@ -59,8 +60,9 @@ func NewRoleService(
 	policies ports.PolicyRepository,
 	tx ports.Transactor,
 	reloader ports.PolicyReloader,
+	audits *appaudit.Service,
 ) *approle.Service {
-	return approle.NewService(roles, permissions, policies, tx, reloader)
+	return approle.NewService(roles, permissions, policies, tx, reloader, audits)
 }
 
 // NewAssignmentService 构造成员角色分配用例。
@@ -71,8 +73,9 @@ func NewAssignmentService(
 	policies ports.PolicyRepository,
 	tx ports.Transactor,
 	reloader ports.PolicyReloader,
+	audits *appaudit.Service,
 ) *approle.AssignmentService {
-	return approle.NewAssignmentService(memberships, roles, assignments, policies, tx, reloader)
+	return approle.NewAssignmentService(memberships, roles, assignments, policies, tx, reloader, audits)
 }
 
 // NewAuthorizationService 构造统一授权判定用例。

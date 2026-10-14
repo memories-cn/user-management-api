@@ -14,14 +14,14 @@ import (
 	"github.com/example/iam-service/internal/transport/http/responses"
 )
 
-// 租户级错误码。
+// 租户级错误码统一引用 responses 包中的唯一来源。
 const (
 	// CodeTenantSuspended 表示租户已停用。
-	CodeTenantSuspended = "TENANT_SUSPENDED"
+	CodeTenantSuspended = responses.CodeTenantSuspended
 	// CodeMembershipInactive 表示成员关系不可用。
-	CodeMembershipInactive = "MEMBERSHIP_INACTIVE"
+	CodeMembershipInactive = responses.CodeMembershipInactive
 	// CodeNotFound 表示资源不存在或无权访问。
-	CodeNotFound = "NOT_FOUND"
+	CodeNotFound = responses.CodeNotFound
 )
 
 // tenantIDKey 是租户 ID 在上下文中的键。

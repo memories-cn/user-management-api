@@ -16,16 +16,18 @@ import (
 	"github.com/example/iam-service/internal/transport/http/responses"
 )
 
-// 认证相关错误码。
+// 错误码统一引用 responses 包中的唯一来源（避免同一语义多处定义）。
+//
+// 这里保留别名仅为兼容既有引用；新增代码请直接使用 responses.CodeXxx。
 const (
 	// CodeUnauthenticated 表示缺少或无效的凭证。
-	CodeUnauthenticated = "UNAUTHENTICATED"
+	CodeUnauthenticated = responses.CodeUnauthenticated
 	// CodeUserDisabled 表示身份有效但用户已被停用。
 	CodeUserDisabled = "USER_DISABLED"
 	// CodeDependencyUnavailable 表示认证链路依赖不可用，必须失败关闭。
-	CodeDependencyUnavailable = "DEPENDENCY_UNAVAILABLE"
+	CodeDependencyUnavailable = responses.CodeDependencyUnavailable
 	// CodeInternal 表示未预期的服务端错误。
-	CodeInternal = "INTERNAL"
+	CodeInternal = responses.CodeInternal
 )
 
 // UserEnsurer 抽象"依据已验证声明确保本地用户可用"的用例，

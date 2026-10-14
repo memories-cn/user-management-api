@@ -31,7 +31,7 @@ func NewMeHandler() *MeHandler {
 func (h *MeHandler) Me(c *gin.Context) {
 	principal, ok := identity.FromContext(c.Request.Context())
 	if !ok {
-		responses.Fail(c, http.StatusUnauthorized, "UNAUTHENTICATED", "missing or invalid credentials")
+		responses.Fail(c, http.StatusUnauthorized, responses.CodeUnauthenticated, "missing or invalid credentials")
 		return
 	}
 

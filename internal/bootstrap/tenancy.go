@@ -6,6 +6,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/example/iam-service/internal/adapters/postgres"
+	appaudit "github.com/example/iam-service/internal/application/audit"
 	appinvitation "github.com/example/iam-service/internal/application/invitation"
 	appmembership "github.com/example/iam-service/internal/application/membership"
 	"github.com/example/iam-service/internal/application/platformadmin"
@@ -74,12 +75,13 @@ func NewTenancyServices(
 	roleSvc *approle.Service,
 	tx ports.Transactor,
 	reloader ports.PolicyReloader,
+	audits *appaudit.Service,
 	cfg config.Config,
 ) TenancyServices {
 	invitationSvc := appinvitation.NewService(
-		invitations, memberships, tx, assignments, cfg.DefaultMemberRoleKey, cfg.InvitationTTL)
-	creator := apptenant.NewCreateService(tenants, policies, tx, invitationSvc, roleSvc, reloader)
-	members := appmembership.NewService(memberships, membershipRoles, policies, tx, reloader)
+		invitations, memberships, tx, assignments, cfg.DefaultMemberRoleKey, cfg.InvitationTTL, audits)
+	creator := apptenant.NewCreateService(tenants, policies, tx, invitationSvc, roleSvc, reloader, audits)
+	members := appmembership.NewService(memberships, membershipRoles, policies, tx, reloader, audits)
 	access := tenancy.NewAccessService(tenants, memberships)
 
 	return TenancyServices{
@@ -88,4 +90,13 @@ func NewTenancyServices(
 		InvitationService: invitationSvc,
 		Access:            access,
 	}
+}
+
+// NewTenantStatusService 构造平台租户状态变更用例。
+func NewTenantStatusService(
+	tenants ports.TenantRepository,
+	tx ports.Transactor,
+	audits *appaudit.Service,
+) *apptenant.StatusService {
+	return apptenant.NewStatusService(tenants, tx, audits)
 }

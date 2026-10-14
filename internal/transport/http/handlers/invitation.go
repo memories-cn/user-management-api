@@ -32,7 +32,7 @@ func (h *InvitationHandler) CreateInvitation(c *gin.Context) {
 	}
 	principal, ok := identity.FromContext(c.Request.Context())
 	if !ok {
-		responses.Fail(c, http.StatusUnauthorized, "UNAUTHENTICATED", "missing or invalid credentials")
+		responses.Fail(c, http.StatusUnauthorized, responses.CodeUnauthenticated, "missing or invalid credentials")
 		return
 	}
 
@@ -77,17 +77,18 @@ func (h *InvitationHandler) ListInvitations(c *gin.Context) {
 		return
 	}
 
-	list, err := h.invitations.ListByTenant(c.Request.Context(), tenantUUID)
+	limit, offset := parsePaging(c)
+	result, err := h.invitations.ListByTenant(c.Request.Context(), tenantUUID, c.Query("status"), limit, offset)
 	if err != nil {
 		writeError(c, err)
 		return
 	}
 
-	items := make([]invitationResponse, 0, len(list))
-	for _, inv := range list {
+	items := make([]invitationResponse, 0, len(result.Invitations))
+	for _, inv := range result.Invitations {
 		items = append(items, toInvitationResponse(inv))
 	}
-	responses.OK(c, items)
+	responses.OKList(c, items, result.Limit, result.Offset, result.Total)
 }
 
 // CancelInvitation 撤销邀请。
@@ -111,7 +112,7 @@ func (h *InvitationHandler) CancelInvitation(c *gin.Context) {
 func (h *InvitationHandler) ListPendingForMe(c *gin.Context) {
 	principal, ok := identity.FromContext(c.Request.Context())
 	if !ok {
-		responses.Fail(c, http.StatusUnauthorized, "UNAUTHENTICATED", "missing or invalid credentials")
+		responses.Fail(c, http.StatusUnauthorized, responses.CodeUnauthenticated, "missing or invalid credentials")
 		return
 	}
 	if !principal.EmailVerified || principal.Email == "" {
@@ -136,7 +137,7 @@ func (h *InvitationHandler) ListPendingForMe(c *gin.Context) {
 func (h *InvitationHandler) AcceptInvitation(c *gin.Context) {
 	principal, ok := identity.FromContext(c.Request.Context())
 	if !ok {
-		responses.Fail(c, http.StatusUnauthorized, "UNAUTHENTICATED", "missing or invalid credentials")
+		responses.Fail(c, http.StatusUnauthorized, responses.CodeUnauthenticated, "missing or invalid credentials")
 		return
 	}
 

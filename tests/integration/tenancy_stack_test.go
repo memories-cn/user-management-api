@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 
+	appaudit "github.com/example/iam-service/internal/application/audit"
 	"github.com/example/iam-service/internal/bootstrap"
 	"github.com/example/iam-service/internal/config"
 	tenantdomain "github.com/example/iam-service/internal/domain/tenant"
@@ -83,18 +84,22 @@ func newTenancyStack(t *testing.T) *tenancyStack {
 	roles := bootstrap.NewRoleRepository(db)
 	membershipRoles := bootstrap.NewMembershipRoleRepository(db)
 	policies := bootstrap.NewPolicyRepository(db)
+	audits := bootstrap.NewAuditRepository(db)
 	tx := bootstrap.NewTxManager(db)
+
+	// 审计用例必须先于业务用例装配，顺序与 bootstrap.New 保持一致。
+	auditSvc := appaudit.NewService(audits)
 
 	authorizer, err := bootstrap.NewAuthorizer(enforcer, policies, cfg.PolicyRefreshInterval)
 	require.NoError(t, err)
 
-	roleSvc := bootstrap.NewRoleService(roles, permissions, policies, tx, authorizer)
+	roleSvc := bootstrap.NewRoleService(roles, permissions, policies, tx, authorizer, auditSvc)
 	assignmentSvc := bootstrap.NewAssignmentService(
-		memberships, roles, membershipRoles, policies, tx, authorizer)
+		memberships, roles, membershipRoles, policies, tx, authorizer, auditSvc)
 
 	services := bootstrap.NewTenancyServices(
 		tenants, memberships, invitations, membershipRoles, policies,
-		assignmentSvc, roleSvc, tx, authorizer, cfg)
+		assignmentSvc, roleSvc, tx, authorizer, auditSvc, cfg)
 
 	app := &bootstrap.App{
 		DB:                db,
@@ -111,7 +116,10 @@ func newTenancyStack(t *testing.T) *tenancyStack {
 		Roles:             roles,
 		MembershipRoles:   membershipRoles,
 		Policies:          policies,
+		Audits:            audits,
+		AuditService:      auditSvc,
 		TenantCreator:     services.TenantCreator,
+		TenantStatus:      bootstrap.NewTenantStatusService(tenants, tx, auditSvc),
 		MemberService:     services.MemberService,
 		InvitationService: services.InvitationService,
 		Access:            services.Access,

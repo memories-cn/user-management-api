@@ -84,17 +84,36 @@ func (r *InvitationRepository) FindPendingByTenantAndEmail(ctx context.Context, 
 	return invitationToDomain(m), nil
 }
 
-// ListByTenant 返回租户的邀请列表，查询必须带 tenant_id 条件。
-func (r *InvitationRepository) ListByTenant(ctx context.Context, tenantID string) ([]*invitation.Invitation, error) {
+// ListByTenant 分页返回租户的邀请列表，查询必须带 tenant_id 条件。
+func (r *InvitationRepository) ListByTenant(ctx context.Context, tenantID, status string, limit, offset int) ([]*invitation.Invitation, error) {
 	var rows []invitationModel
-	err := dbFrom(ctx, r.db).WithContext(ctx).
-		Where("tenant_id = ?", tenantID).
-		Order("created_at DESC").
+	query := dbFrom(ctx, r.db).WithContext(ctx).Where("tenant_id = ?", tenantID)
+	if status != "" {
+		query = query.Where("status = ?", status)
+	}
+
+	err := query.Order("created_at DESC").
+		Limit(limit).Offset(offset).
 		Find(&rows).Error
 	if err != nil {
 		return nil, fmt.Errorf("查询租户邀请失败：%w", err)
 	}
 	return toInvitations(rows), nil
+}
+
+// CountByTenant 统计满足状态过滤的邀请数。
+func (r *InvitationRepository) CountByTenant(ctx context.Context, tenantID, status string) (int64, error) {
+	var count int64
+	query := dbFrom(ctx, r.db).WithContext(ctx).Model(&invitationModel{}).
+		Where("tenant_id = ?", tenantID)
+	if status != "" {
+		query = query.Where("status = ?", status)
+	}
+
+	if err := query.Count(&count).Error; err != nil {
+		return 0, fmt.Errorf("统计租户邀请数失败：%w", err)
+	}
+	return count, nil
 }
 
 // ListPendingByEmail 返回指定邮箱的待接受邀请。

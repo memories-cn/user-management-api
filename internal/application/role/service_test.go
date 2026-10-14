@@ -16,14 +16,14 @@ import (
 // newTestService 用内存替身装配角色用例。
 func newTestService(codes ...string) (*Service, *rbactest.Fixture) {
 	fix := rbactest.NewFixture(codes...)
-	svc := NewService(fix.Roles, fix.Permissions, fix.Policies, fix.Tx, fix.Reloader)
+	svc := NewService(fix.Roles, fix.Permissions, fix.Policies, fix.Tx, fix.Reloader, nil)
 	return svc, fix
 }
 
 // seedRole 在指定租户下创建一个自定义角色。
 func seedRole(t *testing.T, svc *Service, tenantID uuid.UUID, key string) *role.Role {
 	t.Helper()
-	rl, err := svc.CreateRole(context.Background(), tenantID.String(), key, "展示名", "")
+	rl, err := svc.CreateRole(context.Background(), tenantID.String(), key, "展示名", "", uuid.New())
 	require.NoError(t, err)
 	return rl
 }
@@ -32,7 +32,7 @@ func TestCreateRole_CreatesCustomRole(t *testing.T) {
 	svc, _ := newTestService()
 	tenantID := uuid.New()
 
-	rl, err := svc.CreateRole(context.Background(), tenantID.String(), "billing_manager", "账单管理员", "管理账单")
+	rl, err := svc.CreateRole(context.Background(), tenantID.String(), "billing_manager", "账单管理员", "管理账单", uuid.New())
 
 	require.NoError(t, err)
 	assert.Equal(t, "billing_manager", rl.Key)
@@ -43,7 +43,7 @@ func TestCreateRole_RejectsSystemKey(t *testing.T) {
 	svc, _ := newTestService()
 	tenantID := uuid.New()
 
-	_, err := svc.CreateRole(context.Background(), tenantID.String(), role.KeyOwner, "所有者", "")
+	_, err := svc.CreateRole(context.Background(), tenantID.String(), role.KeyOwner, "所有者", "", uuid.New())
 
 	require.ErrorIs(t, err, ErrInvalidRoleKey, "自定义角色不得冒用系统预置标识")
 }
@@ -53,7 +53,7 @@ func TestCreateRole_RejectsDuplicateKey(t *testing.T) {
 	tenantID := uuid.New()
 	seedRole(t, svc, tenantID, "billing_manager")
 
-	_, err := svc.CreateRole(context.Background(), tenantID.String(), "BILLING_MANAGER", "重复", "")
+	_, err := svc.CreateRole(context.Background(), tenantID.String(), "BILLING_MANAGER", "重复", "", uuid.New())
 
 	require.ErrorIs(t, err, ErrRoleKeyConflict, "同租户内标识冲突必须被拒绝且大小写不敏感")
 }
@@ -62,7 +62,7 @@ func TestCreateRole_RejectsInvalidKey(t *testing.T) {
 	svc, _ := newTestService()
 	tenantID := uuid.New()
 
-	_, err := svc.CreateRole(context.Background(), tenantID.String(), "Bad Key", "非法", "")
+	_, err := svc.CreateRole(context.Background(), tenantID.String(), "Bad Key", "非法", "", uuid.New())
 
 	require.ErrorIs(t, err, role.ErrInvalidKey)
 }
@@ -82,7 +82,7 @@ func TestDeleteRole_RejectsSystemRole(t *testing.T) {
 	tenantID := uuid.New()
 	system := rbactest.SeedSystemRole(fix.Roles, tenantID, role.KeyOwner)
 
-	err := svc.DeleteRole(context.Background(), tenantID.String(), system.ID.String())
+	err := svc.DeleteRole(context.Background(), tenantID.String(), system.ID.String(), uuid.New())
 
 	require.ErrorIs(t, err, role.ErrSystemRoleImmutable)
 }
@@ -100,7 +100,7 @@ func TestDeleteRole_RejectsRoleInUse(t *testing.T) {
 	require.NoError(t, fix.MembershipRoles.Replace(context.Background(), tenantID.String(), membershipID,
 		[]*role.Assignment{assignment}))
 
-	err = svc.DeleteRole(context.Background(), tenantID.String(), rl.ID.String())
+	err = svc.DeleteRole(context.Background(), tenantID.String(), rl.ID.String(), uuid.New())
 
 	require.ErrorIs(t, err, ErrRoleInUse)
 }
@@ -109,10 +109,10 @@ func TestDeleteRole_RemovesPolicyAndBumpsVersion(t *testing.T) {
 	svc, fix := newTestService("member:read")
 	tenantID := uuid.New()
 	rl := seedRole(t, svc, tenantID, "billing_manager")
-	_, err := svc.SetRolePermissions(context.Background(), tenantID.String(), rl.ID.String(), []string{"member:read"})
+	_, err := svc.SetRolePermissions(context.Background(), tenantID.String(), rl.ID.String(), []string{"member:read"}, uuid.New())
 	require.NoError(t, err)
 
-	require.NoError(t, svc.DeleteRole(context.Background(), tenantID.String(), rl.ID.String()))
+	require.NoError(t, svc.DeleteRole(context.Background(), tenantID.String(), rl.ID.String(), uuid.New()))
 
 	assert.Empty(t, fix.Policies.RoleRules(rl.ID.String()), "删除角色必须清除其策略投影")
 	assert.Equal(t, 2, fix.Reloader.Count(), "权限设置与删除各刷新一次")
@@ -124,7 +124,7 @@ func TestSetRolePermissions_WritesProjection(t *testing.T) {
 	rl := seedRole(t, svc, tenantID, "billing_manager")
 
 	perms, err := svc.SetRolePermissions(context.Background(), tenantID.String(), rl.ID.String(),
-		[]string{"member:read", "member:invite"})
+		[]string{"member:read", "member:invite"}, uuid.New())
 
 	require.NoError(t, err)
 	require.Len(t, perms, 2)
@@ -141,7 +141,7 @@ func TestSetRolePermissions_RejectsUnknownPermission(t *testing.T) {
 	rl := seedRole(t, svc, tenantID, "billing_manager")
 
 	_, err := svc.SetRolePermissions(context.Background(), tenantID.String(), rl.ID.String(),
-		[]string{"member:read", "member:self_destruct"})
+		[]string{"member:read", "member:self_destruct"}, uuid.New())
 
 	require.ErrorIs(t, err, ErrPermissionNotFound, "目录外权限必须整次拒绝")
 	assert.Empty(t, fix.Policies.RoleRules(rl.ID.String()), "不得部分应用")
@@ -152,7 +152,7 @@ func TestSetRolePermissions_RejectsMalformedCode(t *testing.T) {
 	tenantID := uuid.New()
 	rl := seedRole(t, svc, tenantID, "billing_manager")
 
-	_, err := svc.SetRolePermissions(context.Background(), tenantID.String(), rl.ID.String(), []string{"garbage"})
+	_, err := svc.SetRolePermissions(context.Background(), tenantID.String(), rl.ID.String(), []string{"garbage"}, uuid.New())
 
 	require.Error(t, err)
 	assert.Empty(t, fix.Policies.RoleRules(rl.ID.String()), "非法代码不得写入任何策略")
@@ -164,7 +164,7 @@ func TestSetRolePermissions_RollsBackWhenBumpFails(t *testing.T) {
 	rl := seedRole(t, svc, tenantID, "billing_manager")
 	fix.Policies.SetBumpError(errors.New("版本号递增失败"))
 
-	_, err := svc.SetRolePermissions(context.Background(), tenantID.String(), rl.ID.String(), []string{"member:read"})
+	_, err := svc.SetRolePermissions(context.Background(), tenantID.String(), rl.ID.String(), []string{"member:read"}, uuid.New())
 
 	require.Error(t, err, "提交阶段失败必须向上冒泡，不能假装成功")
 	assert.Equal(t, 0, fix.Reloader.Count(), "回滚后不得刷新策略")
@@ -185,12 +185,12 @@ func TestEnsureSystemRoles_IsIdempotent(t *testing.T) {
 	require.NoError(t, svc.EnsureSystemRoles(context.Background(), tenantID))
 	require.NoError(t, svc.EnsureSystemRoles(context.Background(), tenantID))
 
-	roles, err := svc.ListRoles(context.Background(), tenantID.String())
+	result, err := svc.ListRoles(context.Background(), tenantID.String(), 0, 0)
 	require.NoError(t, err)
-	assert.Len(t, roles, 4, "重复预置不得产生重复角色")
+	assert.Len(t, result.Roles, 4, "重复预置不得产生重复角色")
 
 	// 预置角色应带默认权限投影。
-	for _, rl := range roles {
+	for _, rl := range result.Roles {
 		assert.NotEmpty(t, fix.Policies.RoleRules(rl.ID.String()), "角色 %s 必须有权限投影", rl.Key)
 	}
 }

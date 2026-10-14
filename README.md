@@ -1,11 +1,14 @@
 # IAM Service
 
 基于 ZITADEL 的多租户用户管理与授权微服务。当前已完成 **Milestone 1（可运行骨架）**、
-**Milestone 2（ZITADEL 身份接入）**、**Milestone 3（租户与成员）** 与 **Milestone 4（租户内 RBAC）**：
+**Milestone 2（ZITADEL 身份接入）**、**Milestone 3（租户与成员）**、**Milestone 4（租户内 RBAC）** 与
+**Milestone 5（管理后台 API 与审计）**：
 服务可启动、可执行迁移、可校验 JWT 访问令牌并按需同步本地用户，支持平台管理员创建租户、
 "先认证、后绑定"的成员邀请，以及租户内角色、权限配置与统一授权判定（`POST /api/v1/authorize`）。
 
-审计表、平台管理控制台与生产加固（限流、压测、备份恢复）属于后续里程碑。
+高风险管理操作全部落库留痕，管理接口统一分页信封，并提供 OpenAPI 3.0 文档。
+
+平台管理控制台、限流、压测与备份恢复属于后续里程碑。
 
 ## 技术栈
 
@@ -63,6 +66,13 @@ curl -i -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/me
 | `LOG_LEVEL` | 否 | `info` | `debug` / `info` / `warn` / `error` |
 
 缺少必要配置或取值非法时，进程会**立即退出**并在日志中列出全部问题字段。
+
+## API 文档
+
+完整接口契约见 [`api/openapi.yaml`](api/openapi.yaml)（OpenAPI 3.0）。
+
+文档由测试守护：`tests/integration/openapi_test.go` 会遍历已注册路由，
+双向校验"每个路由都在文档中、文档中没有幽灵端点"。新增或删除路由却忘记更新文档时，CI 会直接失败。
 
 ## 数据库迁移
 
@@ -122,6 +132,13 @@ make down
   - 角色权限矩阵变更 → 本实例提交后立即生效，其他实例最长滞后 `POLICY_REFRESH_INTERVAL`（默认 5s）；
   - 多实例部署当前依赖"策略版本号 + 轮询"，Redis pub/sub watcher 属于后续阶段。
 - **策略与业务数据的原子性**：`casbin_rule` 是业务关系的投影，由 `PolicyRepository` 在**同一个事务**内写入；事务回滚后不会残留策略（即不会出现"业务已回滚但授权仍放行"）。
+- **审计与业务数据的原子性**：审计记录与业务写入、策略投影在同一事务提交。**审计写失败会使整个高风险操作失败**——"改了权限但没留痕"比"操作失败"更不可接受。
+- **审计覆盖范围**：成员移除、成员状态变更、角色分配、角色创建/修改/删除、角色权限变更、成员邀请、租户创建、租户停用与恢复。被拒绝的请求只记结构化日志，不落审计表（避免审计表被越权尝试淹没）。
+- **审计表只追加**：没有更新与删除接口，也没有软删除字段——任何修改都会破坏审计记录本身的可信度。`metadata` 只接受标量值，且键名包含 `token`/`password`/`secret` 等片段时整条拒绝。
+- **审计归属**：针对具体租户的平台操作（停用/恢复）会带上 `tenant_id`，租户管理员能看到"我的租户为什么被停用"；只有真正与租户无关的平台操作（创建租户）使用空 `tenant_id`，且空值只用于审计归属，不作为任何隐式提权通道。
+- **审计查询**：受独立权限 `audit:read` 保护，查询强制限定在当前租户，不接受跨租户参数；非法 `action` 与非法时间区间返回 400（静默忽略会让管理员误以为"没有这类操作"）。
+- **分页响应格式**：所有分页列表统一返回 `{"items": [...], "pagination": {"limit", "offset", "total"}}`。
+- **`ip_address` 的可信度**：取自 `c.ClientIP()`，Gin 默认信任所有代理，因此该字段**可被伪造**，仅作审计的辅助线索、不作为授权依据。生产环境必须调用 `gin.Engine.SetTrustedProxies` 配置可信代理。
 
 ## 接口一览
 
@@ -147,6 +164,8 @@ make down
 | GET/POST | `/api/v1/tenants/:tenantID/roles` | 租户成员 + `role:read` / `role:create` |
 | GET/PATCH/DELETE | `/api/v1/tenants/:tenantID/roles/:roleID` | 租户成员 + `role:read` / `role:update` / `role:delete` |
 | PUT | `/api/v1/tenants/:tenantID/roles/:roleID/permissions` | 租户成员 + `permission:assign` |
+| GET | `/api/v1/tenants/:tenantID/audit-logs` | 租户成员 + `audit:read` |
+| PATCH | `/api/v1/platform/tenants/:tenantID/status` | 平台管理员（停用/恢复租户） |
 | GET | `/api/v1/invitations/pending` | 已认证（按已验证邮箱过滤） |
 | POST | `/api/v1/invitations/:invitationID/accept` | 已认证 |
 
@@ -168,7 +187,7 @@ curl -X POST http://localhost:8080/api/v1/authorize \
 - `/members` 只返回 `user_id`，尚未提供邮箱/展示名映射，该能力随用户目录接口在后续里程碑补齐。
 - 租户停用/删除接口与平台管理员管理界面尚未提供，当前只能在数据库侧变更状态。
 - 邀请令牌通过创建响应返回，生产环境需改为邮件投递。
-- 平台管理与角色/权限变更操作目前只记录结构化日志，审计表在后续里程碑落地。
+- 平台管理与角色/权限变更的审计已落库；审计日志的**导出与归档**尚未实现。
 - **默认拒绝**：Casbin 模型中 `dom` 即业务租户 ID，未定义权限一律拒绝。
 - **多实例策略失效**：当前使用"策略版本号 + 轮询"，最长滞后 `POLICY_REFRESH_INTERVAL`；Redis pub/sub watcher 属于后续阶段。
 - **迁移不随启动执行**：见上文"数据库迁移"。

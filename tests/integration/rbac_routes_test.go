@@ -32,6 +32,7 @@ var expectedTenantPermissions = map[string][2]string{
 	"PATCH /api/v1/tenants/:tenantID/roles/:roleID":              {"role", "update"},
 	"DELETE /api/v1/tenants/:tenantID/roles/:roleID":             {"role", "delete"},
 	"PUT /api/v1/tenants/:tenantID/roles/:roleID/permissions":    {"permission", "assign"},
+	"GET /api/v1/tenants/:tenantID/audit-logs":                   {"audit", "read"},
 }
 
 // TestTenantRoutesDeclarePermissions 校验所有租户级路由都显式声明了所需权限。
@@ -103,4 +104,42 @@ func TestTenantRoutesRequireAuthentication(t *testing.T) {
 	rec := f.stack.do(http.MethodGet, "/api/v1/tenants/"+f.tenantID+"/roles", "", nil)
 
 	require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+}
+
+// TestPlatformRoutesAreDeclared 校验平台路由全部经过 RequirePlatformAdmin。
+//
+// 平台路径与租户路径权限体系不同：前者只看 ZITADEL 平台管理员角色，
+// 因此任何漏挂都会直接变成"任意用户可停用租户"。
+func TestPlatformRoutesAreDeclared(t *testing.T) {
+	expected := map[string]bool{
+		"POST /api/v1/platform/tenants":                   true,
+		"PATCH /api/v1/platform/tenants/:tenantID/status": true,
+	}
+
+	stack := newTenancyStack(t)
+	registered := 0
+	for _, route := range stack.router.Routes() {
+		if len(route.Path) < len("/api/v1/platform") || route.Path[:len("/api/v1/platform")] != "/api/v1/platform" {
+			continue
+		}
+		registered++
+		assert.True(t, expected[route.Method+" "+route.Path],
+			"平台路由 %s %s 未登记到 expectedTenantRoutes", route.Method, route.Path)
+	}
+	require.Equal(t, len(expected), registered, "平台路由表与登记不一致")
+}
+
+// TestPlatformRoutesRejectNonAdmin 校验普通身份无法调用平台接口。
+func TestPlatformRoutesRejectNonAdmin(t *testing.T) {
+	stack := newTenancyStack(t)
+	user := stack.userToken("normal-user", "user@example.com")
+
+	rec := stack.do(http.MethodPost, "/api/v1/platform/tenants", user, map[string]string{
+		"name": "Acme", "slug": "acme", "owner_email": "owner@example.com",
+	})
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	rec = stack.do(http.MethodPatch, "/api/v1/platform/tenants/11111111-1111-1111-1111-111111111111/status",
+		user, map[string]string{"status": "suspended"})
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 }

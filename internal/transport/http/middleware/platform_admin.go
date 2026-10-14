@@ -11,8 +11,8 @@ import (
 	"github.com/example/iam-service/internal/transport/http/responses"
 )
 
-// CodeForbidden 表示身份有效但权限不足。
-const CodeForbidden = "FORBIDDEN"
+// CodeForbidden 表示身份有效但权限不足，引用 responses 包中的唯一来源。
+const CodeForbidden = responses.CodeForbidden
 
 // RequirePlatformAdmin 只允许持有平台管理员角色的身份继续。
 //

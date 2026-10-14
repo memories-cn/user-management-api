@@ -32,10 +32,19 @@ func (f *fakeMemberships) FindByTenantAndUser(_ context.Context, tenantID, userI
 	return f.items[tenantID+"|"+userID], nil
 }
 
-func (f *fakeMemberships) ListByTenant(_ context.Context, _ string, _, _ int) ([]*membershipdomain.Membership, error) {
+func (f *fakeMemberships) ListByTenant(_ context.Context, _, _ string, _, _ int) ([]*membershipdomain.Membership, error) {
 	return nil, nil
 }
 
+func (f *fakeMemberships) CountByTenant(_ context.Context, _, status string) (int64, error) {
+	var count int64
+	for _, m := range f.items {
+		if status == "" || string(m.Status) == status {
+			count++
+		}
+	}
+	return count, nil
+}
 func (f *fakeMemberships) CountActiveByTenant(_ context.Context, _ string) (int64, error) {
 	var count int64
 	for _, m := range f.items {
@@ -68,7 +77,7 @@ func newAssignmentFixture(t *testing.T) *assignmentFixture {
 
 	fix := rbactest.NewFixture("member:read", "member:invite")
 	members := newFakeMemberships()
-	svc := NewAssignmentService(members, fix.Roles, fix.MembershipRoles, fix.Policies, fix.Tx, fix.Reloader)
+	svc := NewAssignmentService(members, fix.Roles, fix.MembershipRoles, fix.Policies, fix.Tx, fix.Reloader, nil)
 
 	tenantID, userID, actorID := uuid.New(), uuid.New(), uuid.New()
 	m, err := membershipdomain.NewMembership(tenantID, userID)

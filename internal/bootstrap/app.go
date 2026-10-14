@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	casbinadapter "github.com/example/iam-service/internal/adapters/casbin"
+	appaudit "github.com/example/iam-service/internal/application/audit"
 	"github.com/example/iam-service/internal/application/authorization"
 	appinvitation "github.com/example/iam-service/internal/application/invitation"
 	appmembership "github.com/example/iam-service/internal/application/membership"
@@ -48,9 +49,14 @@ type App struct {
 	Roles           ports.RoleRepository
 	MembershipRoles ports.MembershipRoleRepository
 	Policies        ports.PolicyRepository
+	// Audits 是审计仓储，AuditService 提供审计写入与查询用例。
+	Audits       ports.AuditRepository
+	AuditService *appaudit.Service
 
 	// TenantCreator 是平台管理员创建租户用例。
 	TenantCreator *apptenant.CreateService
+	// TenantStatus 是平台管理员变更租户状态的用例。
+	TenantStatus *apptenant.StatusService
 	// MemberService 提供成员管理用例。
 	MemberService *appmembership.Service
 	// InvitationService 提供邀请用例。
@@ -106,7 +112,11 @@ func New(cfg config.Config) (*App, error) {
 	roles := NewRoleRepository(db)
 	membershipRoles := NewMembershipRoleRepository(db)
 	policies := NewPolicyRepository(db)
+	audits := NewAuditRepository(db)
 	tx := NewTxManager(db)
+
+	// 审计用例必须先于业务用例构造：业务用例要在事务内写入留痕。
+	auditSvc := appaudit.NewService(audits)
 
 	// 授权器必须在用例之前构造：用例在策略提交后要靠它刷新本地内存策略。
 	authorizer, err := NewAuthorizer(enforcer, policies, cfg.PolicyRefreshInterval)
@@ -115,12 +125,12 @@ func New(cfg config.Config) (*App, error) {
 		return nil, err
 	}
 
-	roleSvc := NewRoleService(roles, permissions, policies, tx, authorizer)
-	assignmentSvc := NewAssignmentService(memberships, roles, membershipRoles, policies, tx, authorizer)
+	roleSvc := NewRoleService(roles, permissions, policies, tx, authorizer, auditSvc)
+	assignmentSvc := NewAssignmentService(memberships, roles, membershipRoles, policies, tx, authorizer, auditSvc)
 
 	services := NewTenancyServices(
 		tenants, memberships, invitations, membershipRoles, policies,
-		assignmentSvc, roleSvc, tx, authorizer, cfg,
+		assignmentSvc, roleSvc, tx, authorizer, auditSvc, cfg,
 	)
 
 	return &App{
@@ -138,7 +148,10 @@ func New(cfg config.Config) (*App, error) {
 		Roles:             roles,
 		MembershipRoles:   membershipRoles,
 		Policies:          policies,
+		Audits:            audits,
+		AuditService:      auditSvc,
 		TenantCreator:     services.TenantCreator,
+		TenantStatus:      NewTenantStatusService(tenants, tx, auditSvc),
 		MemberService:     services.MemberService,
 		InvitationService: services.InvitationService,
 		Access:            services.Access,
