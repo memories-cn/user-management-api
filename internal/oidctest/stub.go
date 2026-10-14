@@ -102,18 +102,25 @@ type Spec struct {
 	KeyID     string
 	ClientID  string
 	Alg       string
+	// Email 与 EmailVerified 模拟 ZITADEL 的邮箱声明。
+	Email         string
+	EmailVerified bool
+	// Roles 模拟 ZITADEL 的 urn:zitadel:iam:user:roles 声明（取值为角色名列表）。
+	Roles []string
 }
 
 // DefaultSpec 返回一份合法令牌的参数。
 func (s *Stub) DefaultSpec(audience string) Spec {
 	return Spec{
-		Issuer:    s.Issuer(),
-		Subject:   "zitadel-001",
-		Audience:  audience,
-		ExpiresAt: time.Now().Add(10 * time.Minute),
-		KeyID:     s.keyID,
-		ClientID:  "client-1",
-		Alg:       "RS256",
+		Issuer:        s.Issuer(),
+		Subject:       "zitadel-001",
+		Audience:      audience,
+		ExpiresAt:     time.Now().Add(10 * time.Minute),
+		KeyID:         s.keyID,
+		ClientID:      "client-1",
+		Alg:           "RS256",
+		Email:         "alice@example.com",
+		EmailVerified: true,
 	}
 }
 
@@ -133,6 +140,18 @@ func (s *Stub) Sign(t testing.TB, spec Spec) string {
 	}
 	if spec.NotBefore != nil {
 		claims["nbf"] = spec.NotBefore.Unix()
+	}
+	if spec.Email != "" {
+		claims["email"] = spec.Email
+		claims["email_verified"] = spec.EmailVerified
+	}
+	if len(spec.Roles) > 0 {
+		// 复刻 ZITADEL 的角色声明形态：{"<role>": {"<orgDomain>": "<orgID>"}}。
+		roles := make(map[string]map[string]string, len(spec.Roles))
+		for _, role := range spec.Roles {
+			roles[role] = map[string]string{"example.com": "org-001"}
+		}
+		claims["urn:zitadel:iam:user:roles"] = roles
 	}
 
 	alg := spec.Alg

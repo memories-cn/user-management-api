@@ -1,8 +1,9 @@
 # IAM Service
 
-基于 ZITADEL 的多租户用户管理与授权微服务。当前已完成 **Milestone 1（可运行骨架）** 与
-**Milestone 2（ZITADEL 身份接入）**：服务可启动、可执行迁移、可校验 JWT 访问令牌并按需同步本地用户；
-租户、成员、角色与权限等业务能力尚未实现。
+基于 ZITADEL 的多租户用户管理与授权微服务。当前已完成 **Milestone 1（可运行骨架）**、
+**Milestone 2（ZITADEL 身份接入）** 与 **Milestone 3（租户与成员）**：服务可启动、可执行迁移、
+可校验 JWT 访问令牌并按需同步本地用户，支持平台管理员创建租户与"先认证、后绑定"的成员邀请；
+租户内角色与细粒度权限（RBAC/Casbin 判定）尚未实现。
 
 ## 技术栈
 
@@ -52,6 +53,8 @@ curl -i -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/me
 | `ZITADEL_SERVICE_CREDENTIALS_FILE` | 否 | — | 访问 ZITADEL 管理 API 的服务身份，当前不使用 |
 | `AUTH_TOKEN_MODE` | 否 | `jwt` | 仅支持 `jwt`；`introspect` 会显式报错（尚未实现） |
 | `AUTH_JWKS_CACHE_TTL` | 否 | `15m` | **仅解析不生效**，密钥缓存与轮换由 go-oidc 内部策略决定 |
+| `PLATFORM_ADMIN_ROLE_KEY` | 否 | `platform_admin` | 平台管理员对应的 ZITADEL 角色名，置空则启动失败 |
+| `INVITATION_TTL` | 否 | `168h`（7 天） | 成员邀请有效期 |
 | `CASBIN_MODEL_PATH` | 否 | `./casbin/model.conf` | Casbin 模型文件 |
 | `LOG_LEVEL` | 否 | `info` | `debug` / `info` / `warn` / `error` |
 
@@ -102,6 +105,33 @@ make down
 - **认证语义**：`401` 缺少/无效凭证，`403` 用户已停用，`503` 身份平台或数据库不可用（fail closed）。身份唯一来源是 `Authorization: Bearer` 中已验证令牌的 `sub`，忽略 `X-User-ID` 之类的请求头。
 - **无认证绕过开关**：不存在 `AUTH_ENABLED=false` 之类的开关，测试通过替身而非开关实现。
 - **用户按需同步**：首次访问依据 `sub` 创建本地映射；展示资料仅在变化时更新；用户停用后返回 `403`。
+- **租户创建**：**仅平台管理员可创建**，判定依据是已验证令牌中的 ZITADEL 角色（`PLATFORM_ADMIN_ROLE_KEY`），**没有白名单或应急通道**。平台管理员创建租户后不会成为其成员，成员关系只能通过邀请建立。
+- **成员邀请：先认证、后绑定**：邀请只绑定已认证且 `email_verified=true` 且邮箱匹配的身份；不会因为一个邮箱字符串创建可登录用户。有效期 7 天，重复邀请与重复接受均幂等。
+- **租户隔离**：非成员与租户不存在都返回 `404`（防枚举）；租户停用返回 `403 TENANT_SUSPENDED`；成员非 active 返回 `403 MEMBERSHIP_INACTIVE`。租户标识只从路径参数读取，不信任任何请求头。
+- **软删除**：成员移除只改状态（`removed`），保留 `(tenant_id, user_id)` 唯一约束，重新邀请走"重新激活"。
+
+## 接口一览
+
+| 方法 | 路径 | 权限 |
+| --- | --- | --- |
+| GET | `/health/live`、`/health/ready` | 无需认证 |
+| GET | `/api/v1/me` | 已认证 |
+| POST | `/api/v1/platform/tenants` | 平台管理员（`platform_admin` 角色） |
+| GET | `/api/v1/tenants` | 已认证（返回我所属的租户） |
+| GET/PATCH | `/api/v1/tenants/:tenantID` | 租户成员 |
+| GET | `/api/v1/tenants/:tenantID/members` | 租户成员 |
+| GET/PATCH/DELETE | `/api/v1/tenants/:tenantID/members/:userID` | 租户成员 |
+| POST/GET | `/api/v1/tenants/:tenantID/invitations` | 租户成员 |
+| DELETE | `/api/v1/tenants/:tenantID/invitations/:invitationID` | 租户成员 |
+| GET | `/api/v1/invitations/pending` | 已认证（按已验证邮箱过滤） |
+| POST | `/api/v1/invitations/:invitationID/accept` | 已认证 |
+
+## 已知限制（本阶段）
+
+- `/members` 只返回 `user_id`，尚未提供邮箱/展示名映射，该能力随用户目录接口在后续里程碑补齐。
+- 租户停用/删除接口与平台管理员管理界面尚未提供，当前只能在数据库侧变更状态。
+- 邀请令牌通过创建响应返回，生产环境需改为邮件投递。
+- 平台管理操作目前只记录结构化日志，审计表在后续里程碑落地。
 - **默认拒绝**：Casbin 模型中 `dom` 即业务租户 ID，未定义权限一律拒绝。
 - **迁移不随启动执行**：见上文"数据库迁移"。
 

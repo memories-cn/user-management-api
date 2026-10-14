@@ -3,10 +3,12 @@ package zitadel
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
+	"sort"
 	"strings"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -44,6 +46,12 @@ type tokenClaims struct {
 	Name     string `json:"name"`
 	Nickname string `json:"nickname"`
 	Picture  string `json:"picture"`
+	// Email 与 EmailVerified 是成员邀请"先认证、后绑定"的依据。
+	Email         string `json:"email"`
+	EmailVerified bool   `json:"email_verified"`
+	// RawRoles 对应 ZITADEL 的角色声明，取值形态通常为 {"<role>":{"<org>":"<orgID>"}}，
+	// 这里只保留原始对象，由 roleKeys 取其键集合。
+	RawRoles map[string]json.RawMessage `json:"urn:zitadel:iam:user:roles"`
 }
 
 // displayName 按优先级选择展示名称。
@@ -93,11 +101,30 @@ func (v *Verifier) Verify(ctx context.Context, rawToken string) (*ports.Claims, 
 	}
 
 	return &ports.Claims{
-		Subject:     token.Subject,
-		ClientID:    extra.ClientID,
-		DisplayName: extra.displayName(),
-		AvatarURL:   extra.Picture,
+		Subject:       token.Subject,
+		ClientID:      extra.ClientID,
+		DisplayName:   extra.displayName(),
+		AvatarURL:     extra.Picture,
+		Email:         strings.ToLower(strings.TrimSpace(extra.Email)),
+		EmailVerified: extra.EmailVerified,
+		Roles:         roleKeys(extra.RawRoles),
 	}, nil
+}
+
+// roleKeys 从角色声明对象中取出角色名并排序，保证结果稳定。
+//
+// 角色声明不可用或形态异常时返回 nil，由调用方按"无角色"处理，
+// 绝不因解析问题放行平台权限。
+func roleKeys(raw map[string]json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(raw))
+	for k := range raw {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // classify 区分凭证无效与身份平台不可用。

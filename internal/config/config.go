@@ -32,6 +32,11 @@ const (
 	defaultTokenMode       = TokenModeJWT
 	defaultJWKSCacheTTL    = 15 * time.Minute
 
+	// defaultPlatformAdminRoleKey 是平台管理员角色名默认值。
+	defaultPlatformAdminRoleKey = "platform_admin"
+	// defaultInvitationTTL 是成员邀请默认有效期：7 天。
+	defaultInvitationTTL = 7 * 24 * time.Hour
+
 	// 环境变量名集中定义，便于文档与测试引用。
 	EnvDatabaseDSN     = "DATABASE_DSN"
 	EnvAppEnv          = "APP_ENV"
@@ -47,6 +52,11 @@ const (
 	EnvZitadelServiceCredentialsFile = "ZITADEL_SERVICE_CREDENTIALS_FILE"
 	EnvAuthTokenMode                 = "AUTH_TOKEN_MODE"
 	EnvAuthJWKSCacheTTL              = "AUTH_JWKS_CACHE_TTL"
+
+	// EnvPlatformAdminRoleKey 指定平台管理员对应的 ZITADEL 角色名。
+	EnvPlatformAdminRoleKey = "PLATFORM_ADMIN_ROLE_KEY"
+	// EnvInvitationTTL 指定成员邀请的有效期。
+	EnvInvitationTTL = "INVITATION_TTL"
 )
 
 // Config 保存服务运行所需的全部配置。
@@ -77,6 +87,12 @@ type Config struct {
 	AuthTokenMode string
 	// AuthJWKSCacheTTL 当前仅解析不生效：go-oidc 的密钥缓存与轮换由其内部策略决定。
 	AuthJWKSCacheTTL time.Duration
+
+	// PlatformAdminRoleKey 是平台管理员对应的 ZITADEL 角色名。
+	// 平台管理员只能通过该角色授予，服务端不提供白名单或应急通道。
+	PlatformAdminRoleKey string
+	// InvitationTTL 是成员邀请的有效期。
+	InvitationTTL time.Duration
 }
 
 // Load 读取环境变量并返回校验后的配置。
@@ -97,6 +113,9 @@ func Load() (Config, error) {
 		ZitadelServiceCredentialsFile: env(EnvZitadelServiceCredentialsFile),
 		AuthTokenMode:                 defaultTokenMode,
 		AuthJWKSCacheTTL:              defaultJWKSCacheTTL,
+
+		PlatformAdminRoleKey: defaultPlatformAdminRoleKey,
+		InvitationTTL:        defaultInvitationTTL,
 	}
 
 	if cfg.DatabaseDSN == "" {
@@ -145,6 +164,7 @@ func Load() (Config, error) {
 	}
 
 	errs = append(errs, loadZitadelConfig(&cfg)...)
+	errs = append(errs, loadTenancyConfig(&cfg)...)
 
 	if len(errs) > 0 {
 		return Config{}, fmt.Errorf("配置校验失败：%w", errors.Join(errs...))
@@ -161,6 +181,32 @@ func LoadDatabaseDSN() (string, error) {
 		return "", fmt.Errorf("配置校验失败：%s 为必填项，不能为空", EnvDatabaseDSN)
 	}
 	return dsn, nil
+}
+
+// loadTenancyConfig 解析并校验租户与成员相关配置，返回全部错误。
+func loadTenancyConfig(cfg *Config) []error {
+	var errs []error
+
+	// 显式设置为空属于配置错误：那会导致无人可创建租户。
+	if raw, ok := os.LookupEnv(EnvPlatformAdminRoleKey); ok {
+		cfg.PlatformAdminRoleKey = strings.TrimSpace(raw)
+		if cfg.PlatformAdminRoleKey == "" {
+			errs = append(errs, fmt.Errorf("%s 不能为空，平台管理员只能通过该角色授予", EnvPlatformAdminRoleKey))
+		}
+	}
+
+	if v := env(EnvInvitationTTL); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s 不是合法的时间段：%w", EnvInvitationTTL, err))
+		} else if d <= 0 {
+			errs = append(errs, fmt.Errorf("%s 必须大于 0", EnvInvitationTTL))
+		} else {
+			cfg.InvitationTTL = d
+		}
+	}
+
+	return errs
 }
 
 // loadZitadelConfig 解析并校验 ZITADEL 与令牌校验配置，返回全部错误。

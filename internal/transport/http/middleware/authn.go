@@ -70,6 +70,9 @@ func AuthN(verifier ports.TokenVerifier, ensurer UserEnsurer) gin.HandlerFunc {
 			UserID:        u.ID.String(),
 			ClientID:      claims.ClientID,
 			Authenticated: true,
+			Email:         claims.Email,
+			EmailVerified: claims.EmailVerified,
+			Roles:         claims.Roles,
 		}
 		c.Request = c.Request.WithContext(identity.WithPrincipal(c.Request.Context(), principal))
 		c.Next()

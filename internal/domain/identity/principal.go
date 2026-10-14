@@ -17,6 +17,11 @@ type Principal struct {
 	ClientID string
 	// Authenticated 表示身份已经过验证。
 	Authenticated bool
+	// Email 与 EmailVerified 用于"先认证、后绑定"的成员邀请流程。
+	Email         string
+	EmailVerified bool
+	// Roles 是已验证令牌中的角色声明，仅供平台管理员等独立授权路径使用。
+	Roles []string
 }
 
 // principalKey 使用私有类型，避免与其他包的上下文键冲突。

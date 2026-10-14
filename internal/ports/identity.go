@@ -26,6 +26,13 @@ type Claims struct {
 	// DisplayName 与 AvatarURL 是可选的展示资料。
 	DisplayName string
 	AvatarURL   string
+	// Email 与 EmailVerified 来自已验证令牌，是"先认证、后绑定"的唯一依据。
+	// 缺失或 EmailVerified 为 false 时一律视为未验证。
+	Email         string
+	EmailVerified bool
+	// Roles 来自已验证令牌中的角色声明（如 ZITADEL 的 urn:zitadel:iam:user:roles）。
+	// 仅用于平台管理员等独立于租户 RBAC 的授权路径，不参与租户内权限判定。
+	Roles []string
 }
 
 // TokenVerifier 校验访问令牌并提取可信声明。

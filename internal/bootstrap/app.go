@@ -9,6 +9,11 @@ import (
 	"github.com/casbin/casbin/v3"
 	"gorm.io/gorm"
 
+	appinvitation "github.com/example/iam-service/internal/application/invitation"
+	appmembership "github.com/example/iam-service/internal/application/membership"
+	"github.com/example/iam-service/internal/application/platformadmin"
+	"github.com/example/iam-service/internal/application/tenancy"
+	apptenant "github.com/example/iam-service/internal/application/tenant"
 	appuser "github.com/example/iam-service/internal/application/user"
 	"github.com/example/iam-service/internal/config"
 	"github.com/example/iam-service/internal/ports"
@@ -26,9 +31,27 @@ type App struct {
 	Users ports.UserRepository
 	// UserSync 执行用户按需同步。
 	UserSync *appuser.SyncService
+
+	// Tx 提供事务边界。
+	Tx ports.Transactor
+	// Tenants、Memberships、Invitations 是租户域仓储。
+	Tenants     ports.TenantRepository
+	Memberships ports.MembershipRepository
+	Invitations ports.InvitationRepository
+
+	// TenantCreator 是平台管理员创建租户用例。
+	TenantCreator *apptenant.CreateService
+	// MemberService 提供成员管理用例。
+	MemberService *appmembership.Service
+	// InvitationService 提供邀请用例。
+	InvitationService *appinvitation.Service
+	// Access 执行租户访问校验。
+	Access *tenancy.AccessService
+	// PlatformAdmin 判定平台管理员。
+	PlatformAdmin *platformadmin.Policy
 }
 
-// New 按 配置 → 数据库 → 迁移校验 → 授权引擎 → 身份链路 的顺序装配依赖。
+// New 按 配置 → 数据库 → 迁移校验 → 授权引擎 → 身份与租户链路 的顺序装配依赖。
 // 任一步失败即返回错误，由调用方决定是否退出进程（快速失败）。
 func New(cfg config.Config) (*App, error) {
 	db, err := OpenDB(cfg)
@@ -53,14 +76,35 @@ func New(cfg config.Config) (*App, error) {
 		return nil, err
 	}
 
+	platformAdmin, err := NewPlatformAdminPolicy(cfg)
+	if err != nil {
+		closeDB(db)
+		return nil, err
+	}
+
 	users := NewUserRepository(db)
+	tenants := NewTenantRepository(db)
+	memberships := NewMembershipRepository(db)
+	invitations := NewInvitationRepository(db)
+	tx := NewTxManager(db)
+
+	creator, members, invitationSvc, access := NewTenancyServices(tenants, memberships, invitations, tx, cfg)
 
 	return &App{
-		DB:       db,
-		Enforcer: enforcer,
-		Verifier: verifier,
-		Users:    users,
-		UserSync: NewUserSync(users),
+		DB:                db,
+		Enforcer:          enforcer,
+		Verifier:          verifier,
+		Users:             users,
+		UserSync:          NewUserSync(users),
+		Tx:                tx,
+		Tenants:           tenants,
+		Memberships:       memberships,
+		Invitations:       invitations,
+		TenantCreator:     creator,
+		MemberService:     members,
+		InvitationService: invitationSvc,
+		Access:            access,
+		PlatformAdmin:     platformAdmin,
 	}, nil
 }
 
