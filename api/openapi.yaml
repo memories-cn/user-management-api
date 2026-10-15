@@ -18,6 +18,8 @@ info:
 servers:
   - url: /api/v1
     description: API 根路径
+  - url: /
+    description: 健康检查、当前用户与指标端点（不挂 /api/v1 前缀）
 
 tags:
   - name: health
@@ -38,6 +40,8 @@ tags:
     description: 审计日志
   - name: authz
     description: 统一授权判定
+  - name: metrics
+    description: 指标（内部端点，不得对公网暴露）
 
 security:
   - bearerAuth: []
@@ -86,6 +90,24 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthenticated"
 
+  /metrics:
+    get:
+      tags: [metrics]
+      summary: Prometheus 指标
+      description: |
+        **内部端点，必须由边缘网关阻断，不对公网暴露。**
+
+        指标标签只含 method / route（路由模板）/ status，刻意不含 tenant_id 与 user_id，
+        避免同时造成标签基数爆炸与租户维度泄漏。
+      security: []
+      servers: [{ url: / }]
+      responses:
+        "200":
+          description: Prometheus 文本格式指标
+          content:
+            text/plain:
+              schema: { type: string }
+
   /permissions:
     get:
       tags: [roles]
@@ -133,6 +155,8 @@ paths:
           $ref: "#/components/responses/InvalidArgument"
         "401":
           $ref: "#/components/responses/Unauthenticated"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "503":
           $ref: "#/components/responses/DependencyUnavailable"
 
@@ -292,6 +316,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 
   /tenants/{tenantID}/members/{userID}/roles:
     parameters:
@@ -345,6 +371,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 
   /tenants/{tenantID}/invitations:
     parameters:
@@ -473,6 +501,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 
   /tenants/{tenantID}/roles/{roleID}:
     parameters:
@@ -542,6 +572,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 
   /tenants/{tenantID}/roles/{roleID}/permissions:
     parameters:
@@ -676,6 +708,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 
   /platform/tenants/{tenantID}/status:
     parameters:
@@ -830,6 +864,17 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorEnvelope" }
           example: { error: { code: ROLE_IN_USE, message: role is still assigned to members }, request_id: req-uuid }
+    RateLimited:
+      description: 请求频率超限。响应携带 Retry-After 头，客户端应按其等待后重试。
+      headers:
+        Retry-After:
+          description: 建议等待的秒数。
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example: { error: { code: RATE_LIMITED, message: too many requests }, request_id: req-uuid }
+
     DependencyUnavailable:
       description: 必要依赖暂时不可用。请求未被放行（fail closed）。
       content:

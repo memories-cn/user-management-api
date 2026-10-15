@@ -1,18 +1,19 @@
 # IAM Service
 
-基于 ZITADEL 的多租户用户管理与授权微服务。当前已完成 **Milestone 1（可运行骨架）**、
-**Milestone 2（ZITADEL 身份接入）**、**Milestone 3（租户与成员）**、**Milestone 4（租户内 RBAC）** 与
-**Milestone 5（管理后台 API 与审计）**：
-服务可启动、可执行迁移、可校验 JWT 访问令牌并按需同步本地用户，支持平台管理员创建租户、
-"先认证、后绑定"的成员邀请，以及租户内角色、权限配置与统一授权判定（`POST /api/v1/authorize`）。
+基于 ZITADEL 的多租户用户管理与授权微服务。当前已完成 **Milestone 1–6 全部六个里程碑**：
 
-高风险管理操作全部落库留痕，管理接口统一分页信封，并提供 OpenAPI 3.0 文档。
+服务可启动、可执行迁移、可校验 JWT 访问令牌并按需同步本地用户；支持平台管理员创建租户、
+"先认证、后绑定"的成员邀请、租户内角色与权限配置、统一授权判定
+（`POST /api/v1/authorize`）；高风险管理操作全部落库留痕；具备限流、Prometheus 指标、
+备份恢复演练与完整的 CI/CD 发布流水线。
 
-平台管理控制台、限流、压测与备份恢复属于后续里程碑。
+性能数字见 [`docs/performance.md`](docs/performance.md)——那是**开发机实测值**，
+不是生产容量承诺，目标环境需复测。
 
 ## 技术栈
 
-Go · Gin · GORM · PostgreSQL · Casbin（RBAC + Tenant Domain）· golang-migrate
+Go · Gin · GORM · PostgreSQL · Casbin（RBAC + Tenant Domain）· golang-migrate ·
+Prometheus（指标）· golang.org/x/time（限流）
 
 ## 快速开始
 
@@ -64,6 +65,13 @@ curl -i -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/me
 | `DEFAULT_MEMBER_ROLE_KEY` | 否 | `member` | 非首个成员加入租户时绑定的默认角色，必须是系统预置角色之一 |
 | `CASBIN_MODEL_PATH` | 否 | `./casbin/model.conf` | Casbin 模型文件 |
 | `LOG_LEVEL` | 否 | `info` | `debug` / `info` / `warn` / `error` |
+| `TRUSTED_PROXIES` | 否 | 空（不信任任何代理） | 可信代理 CIDR/IP 列表；**部署在反代后必须配置**，见下方"可信代理" |
+| `RATE_LIMIT_ENABLED` | 否 | `true` | 是否启用限流 |
+| `RATE_LIMIT_MANAGE_RPS` | 否 | `10` | 管理类接口每秒请求数上限 |
+| `RATE_LIMIT_AUTHORIZE_RPS` | 否 | `100` | 授权判定接口每秒请求数上限（在业务热路径上，必须更宽） |
+| `RATE_LIMIT_BURST` | 否 | `2` | 令牌桶容量倍率，`burst = rps × 该值` |
+| `METRICS_ENABLED` | 否 | `true` | 是否暴露 `/metrics` |
+| `METRICS_PATH` | 否 | `/metrics` | 指标端点路径 |
 
 缺少必要配置或取值非法时，进程会**立即退出**并在日志中列出全部问题字段。
 
@@ -96,10 +104,15 @@ go run ./cmd/migrate -cmd force -steps 1
 make test              # 单元测试，不需要外部服务
 make test-integration  # 集成测试，需要可用的 Docker 守护进程
 make ci                # 格式 + 静态检查 + 单测 + 构建
+make bench             # 授权判定微基准（进 CI，防劣化）
+make vulncheck         # 依赖漏洞扫描
 ```
 
 集成测试使用 testcontainers 启动 PostgreSQL 16；当使用 `-short` 或 Docker 不可用时会自动跳过，
-不会让本地构建失败。
+不会让本地构建失败。集成测试同时覆盖：真实数据库约束、事务一致性、跨租户隔离、
+OpenAPI 与路由的双向覆盖、备份恢复演练。
+
+性能测量见 [`docs/performance.md`](docs/performance.md)。
 
 ## 容器部署
 
@@ -110,6 +123,86 @@ make down
 
 `docker-compose.yml` 中的 `migrate` 服务以 `restart: "no"` 运行一次，
 `api` 服务等待其成功完成后才启动。
+
+生产形态编排见 `deployments/docker/docker-compose.yml`：
+
+```bash
+docker compose -f deployments/docker/docker-compose.yml up -d
+```
+
+与开发版的区别：增加 traefik 边缘网关（并显式阻断 `/metrics` 对外暴露）、
+资源限制与重启策略、健康检查指向 `/health/ready`、多副本部署。
+发布与回滚步骤见 [`docs/release.md`](docs/release.md)。
+
+## 运行期加固
+
+### 限流
+
+对管理 API 与授权 API 分别限流（TDD §10.4），阈值为
+`RATE_LIMIT_MANAGE_RPS`（默认 10）与 `RATE_LIMIT_AUTHORIZE_RPS`（默认 100）。
+
+- 限流键：已认证按 `subject:<用户ID>`，未认证按 `ip:<客户端IP>`
+- 超限返回 `429` + `Retry-After` 头 + 统一错误信封（错误码 `RATE_LIMITED`）
+- **故障语义**：限流器自身故障时**放行**并记录 ERROR 日志。限流是可用性保护而非授权判定，
+  因保护组件故障而拒绝全部请求比放过请求更糟——这与授权判定的 fail closed 是两类不同风险。
+- 多实例部署时每个实例各自限流，累计容量随实例数线性增长；分布式限流需引入 Redis，尚未实现。
+
+### 可信代理（**部署在反代后必须配置**）
+
+`TRUSTED_PROXIES` 决定 `ClientIP()` 的可信度，而该值同时用于：
+
+- 未认证请求的限流键（按 IP 分桶）
+- 审计记录的 `ip_address`
+
+空值表示不信任任何代理，此时 `ClientIP()` 只取自直接连接对端。
+**若部署在反代后却不配置它，全部请求会共享同一个 IP 限流桶，导致所有用户被连带限流**，
+且审计 IP 不可信。生产环境必须设置为边缘网关所在网络的 CIDR。
+
+同理，`ClientIP()` 可被 `X-Forwarded-For` 伪造，因此审计中的 IP 仅作辅助线索，
+**不作为任何授权依据**。
+
+### 监控
+
+`/metrics` 暴露 Prometheus 指标（`METRICS_ENABLED`、`METRICS_PATH` 可配）：
+
+| 指标 | 用途 |
+| --- | --- |
+| `iam_http_requests_total{method,route,status}` | 请求量与错误率 |
+| `iam_http_request_duration_seconds{method,route}` | 延迟分布 |
+| `iam_rate_limited_total{route}` | 限流触发情况（异常升高可能说明阈值过紧或代理配置错误） |
+| `iam_authorization_decisions_total{result}` | 授权判定分布（allowed / denied / error） |
+| `iam_policy_version` | 本地策略版本，观察跨实例失效是否及时 |
+| `iam_policy_reloads_total{result}` | 策略重载成功/失败次数 |
+
+`route` 标签使用路由模板而非具体路径；**标签中不含 tenant_id 与 user_id**，
+避免同时造成标签基数爆炸与租户维度泄漏。
+
+> `/metrics` 是内部端点，**必须由边缘网关阻断，不对公网暴露**。
+> 生产 compose 中已通过 traefik 路由规则实现。
+
+### 备份与恢复
+
+```bash
+make backup    # pg_dump 逻辑备份到 ./backups
+make drill     # 演练：备份 → 还原到独立库 → 校验迁移版本与关键表行数
+make restore   # 从备份还原（会 DROP 目标库对象，务必二次确认）
+```
+
+备份恢复**不是"配了就是可用"**：CI 中包含 `TestBackupRestoreDrill`
+（真实 pg_dump / pg_restore + 逐表行数比对），生产环境建议按季度执行一次 `make drill`。
+
+### 上线前人工门禁
+
+CI 中没有可用的 ZITADEL 实例，因此"真实令牌验证"是人工步骤：
+
+```bash
+IAM_BASE_URL=https://iam.example.com \
+ZITADEL_TOKEN=<真实访问令牌> \
+PLATFORM_ADMIN_TOKEN=<真实平台管理员令牌> \
+  ./deployments/scripts/verify-token.sh
+```
+
+它会核对无令牌 401、有效令牌 200、篡改令牌 401，并打印需人工确认的 claim 清单。
 
 ## 关键约定
 
@@ -185,6 +278,13 @@ curl -X POST http://localhost:8080/api/v1/authorize \
 ## 已知限制（本阶段）
 
 - `/members` 只返回 `user_id`，尚未提供邮箱/展示名映射，该能力随用户目录接口在后续里程碑补齐。
+- **分布式限流未实现**：限流为进程内令牌桶，多实例下每实例各自限流。
+  需要全局一致限额时需引入 Redis（当前未部署）。
+- **Redis 未部署**：`REDIS_ADDR` 仅解析不使用。跨实例策略失效靠版本号 + 轮询，
+  传播上界为一个 `POLICY_REFRESH_INTERVAL`。
+- **性能数字为开发机实测值**，非生产容量承诺；目标环境需按 `docs/performance.md` 复测。
+- **真实 ZITADEL 令牌验证为人工门禁**：CI 无可用实例，上线前需执行
+  `deployments/scripts/verify-token.sh`。
 - 租户停用/删除接口与平台管理员管理界面尚未提供，当前只能在数据库侧变更状态。
 - 邀请令牌通过创建响应返回，生产环境需改为邮件投递。
 - 平台管理与角色/权限变更的审计已落库；审计日志的**导出与归档**尚未实现。
@@ -195,17 +295,21 @@ curl -X POST http://localhost:8080/api/v1/authorize \
 ## 目录结构
 
 ```text
-cmd/api             HTTP 服务入口（启动、优雅关闭）
+cmd/api             HTTP 服务入口（启动、优雅关闭、容器健康检查子命令）
 cmd/migrate         独立迁移命令（只依赖数据库配置）
-internal/config     环境变量解析与校验
-internal/bootstrap  依赖装配（数据库、迁移校验、Casbin、身份链路）
-internal/domain     领域实体与不变量（user、identity），不依赖 Gin/GORM/Casbin
-internal/application 业务用例编排（用户按需同步），只依赖 ports
-internal/ports      依赖倒置接口（TokenVerifier、UserRepository）与哨兵错误
-internal/adapters  外部依赖实现（postgres、zitadel）
-internal/transport/http  Gin 路由、中间件（request_id、日志、认证）、处理器
+internal/config     环境变量解析与启动期校验
+internal/bootstrap  依赖装配（数据库、迁移校验、Casbin、限流、指标、身份链路）
+internal/domain     领域实体与不变量，不依赖 Gin/GORM/Casbin
+internal/application 业务用例编排，只依赖 ports
+internal/ports      依赖倒置接口与哨兵错误
+internal/adapters   外部依赖实现（postgres、casbin、zitadel、ratelimit、metrics）
+internal/rbactest   仅供测试使用的授权域内存替身
+internal/transport/http  Gin 路由、中间件（request_id、日志、认证、租户守卫、权限、限流、指标）、处理器
 internal/oidctest  仅供测试使用的 OIDC 桩
 casbin/model.conf  Casbin 模型（sub, dom, obj, act）
 migrations         版本化 SQL 迁移
-tests/integration  依赖真实 PostgreSQL 的集成与安全回归测试
+tests/integration  依赖真实 PostgreSQL 的集成、安全回归与备份恢复演练测试
+api/openapi.yaml   OpenAPI 3.0 接口契约（由测试守护，不与路由脱节）
+deployments        生产编排（docker）与运维脚本（backup/restore/drill/verify-token）
+docs               TDD、性能测量、发布运行手册
 ```

@@ -1,0 +1,130 @@
+# 生产形态的容器编排。
+#
+# 与开发用 docker-compose.yml 的区别：
+#   - 增加 traefik 作为边缘网关，并显式阻断 /metrics 对外暴露；
+#   - 服务显式声明资源限制与重启策略，避免单个容器拖垮节点；
+#   - 健康检查指向 /health/ready（真实校验依赖），而非 /health/live；
+#   - TRUSTED_PROXIES 必须显式配置，否则未认证请求会共享同一个 IP 限流桶。
+#
+# 使用方式：
+#   docker compose -f deployments/docker/docker-compose.yml up -d
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?必须设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-iam}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # 定期逻辑备份落到这里，由外部作业或 cron 触发 deployments/scripts/backup.sh。
+      - ./backups:/backups
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    logging: &default-logging
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # 迁移是独立、可审计的一步，不随 API 启动自动执行（TDD §13.3）。
+  # 多实例同时执行迁移会产生不可控的结构变更，因此单独作为一个 job 运行。
+  migrate:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    entrypoint: ["/iam-migrate"]
+    command: ["-cmd", "up"]
+    environment:
+      DATABASE_DSN: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-iam}?sslmode=disable
+      LOG_LEVEL: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    entrypoint: ["/iam-api"]
+    environment:
+      APP_ENV: production
+      APP_HTTP_ADDR: :8080
+
+      DATABASE_DSN: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-iam}?sslmode=disable
+      CASBIN_MODEL_PATH: /casbin/model.conf
+
+      # 必须与真实 ZITADEL 实例一致，启动时会校验并快速失败。
+      ZITADEL_ISSUER: ${ZITADEL_ISSUER:?必须设置 ZITADEL_ISSUER}
+      ZITADEL_API_AUDIENCE: ${ZITADEL_API_AUDIENCE:?必须设置 ZITADEL_API_AUDIENCE}
+      PLATFORM_ADMIN_ROLE_KEY: ${PLATFORM_ADMIN_ROLE_KEY:-platform_admin}
+
+      # 多实例部署下，策略变更在其他实例上的可见延迟不超过该值。
+      POLICY_REFRESH_INTERVAL: ${POLICY_REFRESH_INTERVAL:-5s}
+
+      # 必须配置为 traefik 所在网络的 CIDR，否则未认证请求会共享同一个
+      # IP 限流桶（全部用户被连带限流），且审计 ip_address 不可信。
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:?必须设置 TRUSTED_PROXIES（traefik 网络 CIDR）}
+
+      # 限流阈值按业务量调整：管理接口 10 rps、授权判定 100 rps。
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      RATE_LIMIT_MANAGE_RPS: ${RATE_LIMIT_MANAGE_RPS:-10}
+      RATE_LIMIT_AUTHORIZE_RPS: ${RATE_LIMIT_AUTHORIZE_RPS:-100}
+
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # 指向 /health/ready：它真实校验数据库、迁移状态与策略刷新，
+      # 依赖不可用时返回 503，编排平台据此摘除流量而不是把进程杀掉。
+      test: ["CMD", "/iam-api", "-healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      # 只对外暴露 /api 与 /health，/metrics 绝不进入公网路由。
+      - "traefik.http.routers.iam.rule=PathPrefix(`/api/v1`) || Path(`/health/live`) || Path(`/health/ready`)"
+      - "traefik.http.routers.iam.entrypoints=websecure"
+      - "traefik.http.services.iam.loadbalancer.server.port=8080"
+    deploy:
+      replicas: ${API_REPLICAS:-2}
+      resources:
+        limits:
+          memory: 512M
+    logging: *default-logging
+
+  traefik:
+    image: traefik:v3.3
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.websecure.address=:443"
+      # 指标端点只应被 traefik 自己或内网监控抓取，
+      # 这里显式不为 /metrics 创建任何 router，使其无法从外部到达。
+    ports:
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+    logging: *default-logging
+
+volumes:
+  pgdata:

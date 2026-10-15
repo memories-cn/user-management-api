@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -41,6 +43,21 @@ const (
 	// defaultMemberRoleKey 是普通成员加入租户时的默认角色。
 	defaultMemberRoleKey = "member"
 
+	// defaultRateLimitEnabled 控制限流是否启用。
+	defaultRateLimitEnabled = true
+	// defaultManageRPS 是管理类接口的每秒请求数上限。
+	defaultManageRPS = 10.0
+	// defaultAuthorizeRPS 是授权判定接口的每秒请求数上限。
+	// 授权判定在业务热路径上，阈值必须显著宽于管理接口。
+	defaultAuthorizeRPS = 100.0
+	// defaultRateLimitBurst 是令牌桶容量，取 RPS 的倍数以获得突发余量。
+	defaultRateLimitBurst = 2.0
+
+	// defaultMetricsEnabled 控制 /metrics 是否暴露。
+	defaultMetricsEnabled = true
+	// defaultMetricsPath 是指标端点路径。
+	defaultMetricsPath = "/metrics"
+
 	// 环境变量名集中定义，便于文档与测试引用。
 	EnvDatabaseDSN     = "DATABASE_DSN"
 	EnvAppEnv          = "APP_ENV"
@@ -61,6 +78,21 @@ const (
 	EnvPlatformAdminRoleKey = "PLATFORM_ADMIN_ROLE_KEY"
 	// EnvInvitationTTL 指定成员邀请的有效期。
 	EnvInvitationTTL = "INVITATION_TTL"
+
+	// EnvRateLimitEnabled 控制限流中间件是否生效。
+	EnvRateLimitEnabled = "RATE_LIMIT_ENABLED"
+	// EnvRateLimitManageRPS 指定管理类接口的每秒请求数上限。
+	EnvRateLimitManageRPS = "RATE_LIMIT_MANAGE_RPS"
+	// EnvRateLimitAuthorizeRPS 指定授权判定接口的每秒请求数上限。
+	EnvRateLimitAuthorizeRPS = "RATE_LIMIT_AUTHORIZE_RPS"
+	// EnvRateLimitBurst 指定令牌桶容量倍率。
+	EnvRateLimitBurst = "RATE_LIMIT_BURST"
+	// EnvMetricsEnabled 控制 /metrics 端点是否暴露。
+	EnvMetricsEnabled = "METRICS_ENABLED"
+	// EnvMetricsPath 指定指标端点路径。
+	EnvMetricsPath = "METRICS_PATH"
+	// EnvTrustedProxies 指定可信代理的 CIDR/IP 列表（逗号分隔）。
+	EnvTrustedProxies = "TRUSTED_PROXIES"
 
 	// EnvPolicyRefreshInterval 指定跨实例策略失效检查间隔。
 	EnvPolicyRefreshInterval = "POLICY_REFRESH_INTERVAL"
@@ -110,6 +142,27 @@ type Config struct {
 	// DefaultMemberRoleKey 是非首个成员加入租户时绑定的默认角色标识，
 	// 必须是系统预置角色之一。
 	DefaultMemberRoleKey string
+
+	// RateLimitEnabled 控制限流是否生效。
+	RateLimitEnabled bool
+	// ManageRPS 是管理类接口的每秒请求数上限。
+	ManageRPS float64
+	// AuthorizeRPS 是授权判定接口的每秒请求数上限。
+	AuthorizeRPS float64
+	// RateLimitBurst 是令牌桶容量倍率。
+	RateLimitBurst float64
+
+	// MetricsEnabled 控制 /metrics 端点是否暴露。
+	MetricsEnabled bool
+	// MetricsPath 是指标端点路径，必须以 / 开头。
+	MetricsPath string
+
+	// TrustedProxies 是可信代理的 CIDR/IP 列表。
+	//
+	// 空列表表示不信任任何代理：此时 ClientIP() 只取自直接连接的对端地址。
+	// 该值同时决定限流键（未认证请求按 IP 分桶）与审计 ip_address 的可信度，
+	// 因此部署在反代之后时必须显式配置，否则所有请求会共享同一个 IP 桶。
+	TrustedProxies []string
 }
 
 // Load 读取环境变量并返回校验后的配置。
@@ -135,6 +188,14 @@ func Load() (Config, error) {
 		InvitationTTL:         defaultInvitationTTL,
 		PolicyRefreshInterval: defaultPolicyRefreshInterval,
 		DefaultMemberRoleKey:  defaultMemberRoleKey,
+
+		RateLimitEnabled: defaultRateLimitEnabled,
+		ManageRPS:        defaultManageRPS,
+		AuthorizeRPS:     defaultAuthorizeRPS,
+		RateLimitBurst:   defaultRateLimitBurst,
+		MetricsEnabled:   defaultMetricsEnabled,
+		MetricsPath:      defaultMetricsPath,
+		TrustedProxies:   nil,
 	}
 
 	if cfg.DatabaseDSN == "" {
@@ -184,11 +245,114 @@ func Load() (Config, error) {
 
 	errs = append(errs, loadZitadelConfig(&cfg)...)
 	errs = append(errs, loadTenancyConfig(&cfg)...)
+	errs = append(errs, loadRuntimeConfig(&cfg)...)
 
 	if len(errs) > 0 {
 		return Config{}, fmt.Errorf("配置校验失败：%w", errors.Join(errs...))
 	}
 	return cfg, nil
+}
+
+// loadRuntimeConfig 解析并校验限流、指标与可信代理配置，返回全部错误。
+func loadRuntimeConfig(cfg *Config) []error {
+	var errs []error
+
+	if v := env(EnvRateLimitEnabled); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s 不是合法的布尔值：%q", EnvRateLimitEnabled, v))
+		} else {
+			cfg.RateLimitEnabled = enabled
+		}
+	}
+
+	if v := env(EnvRateLimitManageRPS); v != "" {
+		rps, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s 不是合法的数值：%w", EnvRateLimitManageRPS, err))
+		} else if rps <= 0 {
+			errs = append(errs, fmt.Errorf("%s 必须大于 0", EnvRateLimitManageRPS))
+		} else {
+			cfg.ManageRPS = rps
+		}
+	}
+
+	if v := env(EnvRateLimitAuthorizeRPS); v != "" {
+		rps, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s 不是合法的数值：%w", EnvRateLimitAuthorizeRPS, err))
+		} else if rps <= 0 {
+			errs = append(errs, fmt.Errorf("%s 必须大于 0", EnvRateLimitAuthorizeRPS))
+		} else {
+			cfg.AuthorizeRPS = rps
+		}
+	}
+
+	if v := env(EnvRateLimitBurst); v != "" {
+		burst, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s 不是合法的数值：%w", EnvRateLimitBurst, err))
+		} else if burst < 1 {
+			errs = append(errs, fmt.Errorf("%s 必须不小于 1（否则突发请求会被立即拒绝）", EnvRateLimitBurst))
+		} else {
+			cfg.RateLimitBurst = burst
+		}
+	}
+
+	if v := env(EnvMetricsEnabled); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s 不是合法的布尔值：%q", EnvMetricsEnabled, v))
+		} else {
+			cfg.MetricsEnabled = enabled
+		}
+	}
+
+	if v := env(EnvMetricsPath); v != "" {
+		if !strings.HasPrefix(v, "/") {
+			errs = append(errs, fmt.Errorf("%s 必须以 / 开头：%q", EnvMetricsPath, v))
+		} else {
+			cfg.MetricsPath = v
+		}
+	}
+
+	if v := env(EnvTrustedProxies); v != "" {
+		proxies, err := parseTrustedProxies(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s 含有非法条目：%w", EnvTrustedProxies, err))
+		} else {
+			cfg.TrustedProxies = proxies
+		}
+	}
+
+	return errs
+}
+
+// parseTrustedProxies 解析逗号分隔的 CIDR 或 IP 列表。
+//
+// 单个 IP 会被归一化为 /32 或 /128，与 gin.SetTrustedProxies 的期望一致。
+func parseTrustedProxies(raw string) ([]string, error) {
+	parts := strings.Split(raw, ",")
+	result := make([]string, 0, len(parts))
+	for i, part := range parts {
+		entry := strings.TrimSpace(part)
+		if entry == "" {
+			return nil, fmt.Errorf("第 %d 项为空", i+1)
+		}
+		if strings.Contains(entry, "/") {
+			if _, _, err := net.ParseCIDR(entry); err != nil {
+				return nil, fmt.Errorf("第 %d 项 %q 不是合法 CIDR", i+1, entry)
+			}
+		} else if ip := net.ParseIP(entry); ip == nil {
+			return nil, fmt.Errorf("第 %d 项 %q 不是合法 IP", i+1, entry)
+		} else if ip.To4() != nil {
+			entry += "/32"
+		} else {
+			entry += "/128"
+		}
+		result = append(result, entry)
+	}
+	return result, nil
 }
 
 // LoadDatabaseDSN 只读取并校验迁移所需的数据库配置。

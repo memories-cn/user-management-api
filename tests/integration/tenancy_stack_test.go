@@ -30,6 +30,12 @@ const (
 	tenancyInvitationTTL = 7 * 24 * time.Hour
 	// tenancyPolicyRefresh 是策略失效检查间隔，集成测试用短间隔减少等待。
 	tenancyPolicyRefresh = 50 * time.Millisecond
+
+	// 与 internal/config 的默认值保持一致，避免测试与生产阈值漂移。
+	defaultManageRPS      = 10.0
+	defaultAuthorizeRPS   = 100.0
+	defaultRateLimitBurst = 2.0
+	defaultMetricsPath    = "/metrics"
 )
 
 // tenancyStack 是在真实 PostgreSQL 与 OIDC 桩之上装配的完整服务栈。
@@ -47,6 +53,15 @@ type tenancyStack struct {
 // 装配顺序与 bootstrap.New 一致：策略仓储 → 授权器 → 角色用例 → 租户域用例，
 // 保证集成测试覆盖的依赖图与生产完全相同。
 func newTenancyStack(t *testing.T) *tenancyStack {
+	t.Helper()
+	return newTenancyStackWithConfig(t, func(cfg *config.Config) {})
+}
+
+// newTenancyStackWithConfig 允许调用方覆写配置字段后再装配。
+//
+// 用于限流等需要可控阈值的用例：与其在装配后替换组件，
+// 不如让配置从一开始就是测试期望的值，避免出现"装配用的是 A、运行用的是 B"。
+func newTenancyStackWithConfig(t *testing.T, mutate func(*config.Config)) *tenancyStack {
 	t.Helper()
 
 	dsn := newDatabase(t)
@@ -68,7 +83,16 @@ func newTenancyStack(t *testing.T) *tenancyStack {
 		InvitationTTL:         tenancyInvitationTTL,
 		PolicyRefreshInterval: tenancyPolicyRefresh,
 		DefaultMemberRoleKey:  "member",
+
+		// 运行期组件默认全部启用，与生产默认值一致。
+		RateLimitEnabled: true,
+		ManageRPS:        defaultManageRPS,
+		AuthorizeRPS:     defaultAuthorizeRPS,
+		RateLimitBurst:   defaultRateLimitBurst,
+		MetricsEnabled:   true,
+		MetricsPath:      defaultMetricsPath,
 	}
+	mutate(&cfg)
 
 	verifier, err := bootstrap.NewTokenVerifier(context.Background(), cfg)
 	require.NoError(t, err)
@@ -101,6 +125,14 @@ func newTenancyStack(t *testing.T) *tenancyStack {
 		tenants, memberships, invitations, membershipRoles, policies,
 		assignmentSvc, roleSvc, tx, authorizer, auditSvc, cfg)
 
+	// 限流与指标按配置装配：默认开启，阈值由测试按需覆写。
+	rateLimiter, err := bootstrap.NewRateLimiter(cfg)
+	require.NoError(t, err)
+	authorizeLimiter, err := bootstrap.NewAuthorizeLimiter(cfg)
+	require.NoError(t, err)
+	metricsRecorder, err := bootstrap.NewMetricsRecorder(cfg)
+	require.NoError(t, err)
+
 	app := &bootstrap.App{
 		DB:                db,
 		Enforcer:          enforcer,
@@ -127,6 +159,11 @@ func newTenancyStack(t *testing.T) *tenancyStack {
 		AssignmentService: assignmentSvc,
 		Authorization:     bootstrap.NewAuthorizationService(services.Access, authorizer),
 		PlatformAdmin:     policy,
+
+		Config:           cfg,
+		RateLimiter:      rateLimiter,
+		AuthorizeLimiter: authorizeLimiter,
+		Metrics:          metricsRecorder,
 	}
 
 	return &tenancyStack{
@@ -169,6 +206,13 @@ func (s *tenancyStack) do(method, path, token string, body any) *httptest.Respon
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+	return s.serve(req)
+}
+
+// serve 执行一个已构造好的请求，便于测试自定义请求头（如伪造身份头）。
+func (s *tenancyStack) serve(req *http.Request) *httptest.ResponseRecorder {
+	s.t.Helper()
+
 	rec := httptest.NewRecorder()
 	s.router.ServeHTTP(rec, req)
 	return rec

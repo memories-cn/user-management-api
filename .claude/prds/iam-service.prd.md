@@ -75,7 +75,7 @@ We'll know we're right when **跨租户越权安全回归用例 100% 通过（Te
 | 3 | 租户与成员 | 租户管理员可管理本租户成员及成员状态；所有租户级接口执行成员资格与租户状态检查 | complete | `.claude/plans/iam-service-tenants-and-members.plan.md` |
 | 4 | 租户内 RBAC | 租户内角色与权限可配置，成员可分配角色，业务服务可通过统一接口判定权限；策略变更能正确撤权 | complete | `.claude/plans/iam-service-tenant-rbac.plan.md` |
 | 5 | 管理后台 API 与审计 | 管理员能完成租户成员管理与角色权限配置；高风险操作全部留痕且审计访问受独立权限保护 | complete | `.claude/plans/iam-service-admin-api-and-audit.plan.md` |
-| 6 | 生产加固 | 性能目标经压测验证，核心安全测试全部通过，具备限流、监控、备份恢复与发布流程 | pending | — |
+| 6 | 生产加固 | 性能目标经压测验证，核心安全测试全部通过，具备限流、监控、备份恢复与发布流程 | complete | `.claude/plans/iam-service-production-hardening.plan.md` |
 
 ## Open Questions
 

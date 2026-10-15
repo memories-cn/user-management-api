@@ -1,4 +1,4 @@
-.PHONY: fmt vet test test-integration build migrate-up migrate-down migrate-version up down ci
+.PHONY: fmt vet test test-integration build migrate-up migrate-down migrate-version up down ci bench load-test vulncheck backup restore drill
 
 # 格式化全部 Go 代码
 fmt:
@@ -46,3 +46,31 @@ ci: vet test build
 	if [ -n "$$unformatted" ]; then \
 		echo "以下文件未通过 gofmt："; echo "$$unformatted"; exit 1; \
 	fi
+
+# 授权判定微基准（对应 docs/TDD.md 12.1 的 10ms 目标）。
+# 进 CI：用于防止判定路径发生数量级级别的劣化。
+bench:
+	go test ./internal/adapters/casbin/ -run '^$$' -bench BenchmarkEnforce -benchtime=2000x
+
+# 端到端负载测试（对应 200ms 目标与 100 并发基线）。
+# 默认不运行：需要 Docker 且结果受机器负载影响大，按需执行。
+# 结果记录到 docs/performance.md。
+load-test:
+	IAM_LOAD_TEST=1 go test ./tests/integration/... -run TestLoad -count=1 -v -timeout 30m
+
+# 依赖漏洞扫描（需要网络访问漏洞库）
+vulncheck:
+	go install golang.org/x/vuln/cmd/govulncheck@latest
+	govulncheck ./...
+
+# 逻辑备份到 ./backups（需设置 DATABASE_DSN）
+backup:
+	./deployments/scripts/backup.sh ./backups
+
+# 从备份还原（会 DROP 目标库对象，务必二次确认）
+restore:
+	./deployments/scripts/restore.sh $(DUMP) $(DATABASE_DSN)
+
+# 备份恢复演练：备份 → 还原到独立库 → 校验版本与行数
+drill:
+	DATABASE_DSN=$(DATABASE_DSN) ./deployments/scripts/drill.sh

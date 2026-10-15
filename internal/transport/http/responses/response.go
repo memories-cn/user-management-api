@@ -41,6 +41,9 @@ const (
 	CodeInvalidArgument = "INVALID_ARGUMENT"
 	// CodeInternal 表示未预期的服务端错误（500）。
 	CodeInternal = "INTERNAL"
+	// CodeRateLimited 表示请求频率超限（429）。
+	// 与 CodeForbidden 严格区分：前者表示"稍后重试"，后者表示"无权访问"。
+	CodeRateLimited = "RATE_LIMITED"
 )
 
 // Pagination 描述分页元信息。

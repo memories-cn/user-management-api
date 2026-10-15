@@ -10,6 +10,8 @@ import (
 	"gorm.io/gorm"
 
 	casbinadapter "github.com/example/iam-service/internal/adapters/casbin"
+	"github.com/example/iam-service/internal/adapters/metrics"
+	"github.com/example/iam-service/internal/adapters/ratelimit"
 	appaudit "github.com/example/iam-service/internal/application/audit"
 	"github.com/example/iam-service/internal/application/authorization"
 	appinvitation "github.com/example/iam-service/internal/application/invitation"
@@ -52,6 +54,15 @@ type App struct {
 	// Audits 是审计仓储，AuditService 提供审计写入与查询用例。
 	Audits       ports.AuditRepository
 	AuditService *appaudit.Service
+
+	// Config 是生效配置，供传输层读取可信代理等运行期参数。
+	Config config.Config
+	// RateLimiter 是管理类接口限流器；未启用时为 nil。
+	RateLimiter *ratelimit.MemoryLimiter
+	// AuthorizeLimiter 是授权判定接口限流器；未启用时为 nil。
+	AuthorizeLimiter *ratelimit.MemoryLimiter
+	// Metrics 是指标采集器；未启用时为 nil。
+	Metrics *metrics.Recorder
 
 	// TenantCreator 是平台管理员创建租户用例。
 	TenantCreator *apptenant.CreateService
@@ -125,6 +136,22 @@ func New(cfg config.Config) (*App, error) {
 		return nil, err
 	}
 
+	rateLimiter, err := NewRateLimiter(cfg)
+	if err != nil {
+		closeDB(db)
+		return nil, err
+	}
+	authorizeLimiter, err := NewAuthorizeLimiter(cfg)
+	if err != nil {
+		closeDB(db)
+		return nil, err
+	}
+	metricsRecorder, err := NewMetricsRecorder(cfg)
+	if err != nil {
+		closeDB(db)
+		return nil, err
+	}
+
 	roleSvc := NewRoleService(roles, permissions, policies, tx, authorizer, auditSvc)
 	assignmentSvc := NewAssignmentService(memberships, roles, membershipRoles, policies, tx, authorizer, auditSvc)
 
@@ -159,6 +186,11 @@ func New(cfg config.Config) (*App, error) {
 		AssignmentService: assignmentSvc,
 		Authorization:     NewAuthorizationService(services.Access, authorizer),
 		PlatformAdmin:     platformAdmin,
+
+		Config:           cfg,
+		RateLimiter:      rateLimiter,
+		AuthorizeLimiter: authorizeLimiter,
+		Metrics:          metricsRecorder,
 	}, nil
 }
 
@@ -182,7 +214,31 @@ func (a *App) Check(ctx context.Context) error {
 	if err := a.Authorizer.LastError(); err != nil {
 		return fmt.Errorf("授权策略刷新失败：%w", err)
 	}
+	// 装配遗漏在启动期就应暴露，但这里再兜一层：
+	// 就绪检查的作用是回答"我是否具备处理请求的条件"，
+	// 少一个运行期组件与数据库不可用同样属于"不具备"。
+	if a.Config.MetricsEnabled && a.Metrics == nil {
+		return errors.New("指标采集器未装配")
+	}
+	if a.Config.RateLimitEnabled && a.RateLimiter == nil {
+		return errors.New("限流器未装配")
+	}
 	return nil
+}
+
+// StartBackgroundJobs 启动运行期后台任务，直到 ctx 取消为止。
+//
+// 集中在一处启动，避免 main 里散落多个 go 语句而漏掉其中一个。
+func (a *App) StartBackgroundJobs(ctx context.Context) {
+	if a.Authorizer != nil {
+		a.Authorizer.StartRefresher(ctx)
+	}
+	if a.RateLimiter != nil {
+		a.RateLimiter.StartEviction(ctx)
+	}
+	if a.AuthorizeLimiter != nil {
+		a.AuthorizeLimiter.StartEviction(ctx)
+	}
 }
 
 // Close 释放数据库连接。

@@ -25,7 +25,7 @@ jobs:
             exit 1
           fi
 
-      # 2. go vet
+      # 2. go vet（静态分析）
       - name: go vet
         run: go vet ./...
 
@@ -37,12 +37,34 @@ jobs:
       - name: build
         run: go build ./...
 
-      # 5. 集成测试（GitHub Runner 自带 Docker）
+      # 5. Casbin 策略测试（授权模型是安全边界，单独一步便于定位失败）
+      - name: casbin policy tests
+        run: go test ./internal/adapters/casbin/... -count=1
+
+      # 6. 集成测试（GitHub Runner 自带 Docker）
+      #    覆盖 PostgreSQL 真实约束、事务一致性、跨租户隔离、
+      #    OpenAPI 与路由的覆盖性、备份恢复演练。
       - name: integration tests
         run: go test ./tests/integration/... -count=1
 
-      # 6. Docker 镜像构建
+      # 7. Docker 镜像构建
       - name: docker build
         run: docker build -t iam-service:ci .
 
-      # TODO: 接入 govulncheck 做依赖漏洞扫描
+  # 8. 依赖漏洞扫描（TDD §13.3）。
+  #    单独一个 job：漏洞库查询需要外网，网络抖动不应让整个 verify 变红，
+  #    但真实的漏洞必须让这个 job 失败而不是被 continue-on-error 吞掉。
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: govulncheck
+        run: govulncheck ./...

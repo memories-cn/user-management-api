@@ -53,6 +53,10 @@ const (
 // adminDB 指向容器中的默认数据库，用于创建与销毁每个用例的独立数据库。
 var adminDB *sql.DB
 
+// pgContainer 是 PostgreSQL 容器句柄，供需要在容器内执行命令的用例使用
+// （例如备份恢复演练要在容器里跑 pg_dump）。
+var pgContainer *postgres.PostgresContainer
+
 // pgHost、pgPort 是 PostgreSQL 容器映射到宿主机的地址，由 TestMain 初始化。
 var pgHost, pgPort string
 
@@ -100,6 +104,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	pgHost, pgPort = host, mapped.Port()
+	pgContainer = ctr
 
 	db, err := sql.Open("postgres", adminDSN())
 	if err != nil {
@@ -325,4 +330,16 @@ func newMigrate(dsn string) (*migrate.Migrate, error) {
 		return nil, err
 	}
 	return migrate.NewWithSourceInstance("iofs", src, dsn)
+}
+
+// openGormForDSN 打开指定 DSN 的数据库连接，供需要直接操作数据库的用例使用。
+func openGormForDSN(t *testing.T, dsn string) (*gorm.DB, error) {
+	t.Helper()
+
+	db, err := bootstrap.OpenDB(configFor(dsn))
+	if err != nil {
+		return nil, err
+	}
+	t.Cleanup(func() { closeGorm(t, db) })
+	return db, nil
 }
